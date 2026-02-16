@@ -125,7 +125,7 @@ class Precision_Matrix_Single_Conv(GDG_Factor_Matrix):
         return x
 
 class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
-    def __init__(self, box, prior, rescaling_factor, k_cut, w_cut):
+    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut, w_cut):
         super().__init__()
         self.learning_rate = 1e-2
         self.early_stopping_patience = 5
@@ -133,6 +133,7 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
 
         self.box = box
         self.N = box.N
+        self.sigma_noise = sigma_noise
         self.rescaling_factor = rescaling_factor
         self.k_cut = k_cut
         self.w_cut = w_cut
@@ -154,6 +155,7 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
 
     def forward(self, A, B):
         x = A['delta_z0']
+        x += torch.randn_like(x) * self.sigma_noise    # add noise to the final field
         b = self.estimator(x)
 
         z = B['delta_z127'][:len(x)]
