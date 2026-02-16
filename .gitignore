@@ -1,0 +1,28 @@
+# Paper
+*.tex
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+
+# Training runs (models, plots, logs, configs)
+runs/
+
+# Plots
+plots/
+
+# PyTorch model checkpoints
+*.pt
+
+# Data
+Quijote_target/
+*.zarr
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.ipynb_checkpoints/
