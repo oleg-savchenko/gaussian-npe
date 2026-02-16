@@ -15,7 +15,6 @@ Usage:
 """
 
 import os
-import sys
 import argparse
 import json
 import numpy as np
@@ -23,9 +22,8 @@ import torch
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Add the gaussian-npe package to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'gaussian-npe'))
-from gaussian_npe import utils, gaussian_npe
+from gaussian_npe import utils
+from gaussian_npe.networks import Gaussian_NPE_Network
 
 
 # ── Quijote fiducial cosmology (Planck 2018) ────────────────────────────
@@ -133,10 +131,7 @@ def main():
     box = utils.Power_Spectrum_Sampler(BOX_PARAMS, device=device)
     print(f'k_Nq = {box.k_Nq:.4f} h/Mpc, k_F = {box.k_F:.6f} h/Mpc')
 
-    Dz_approx = (
-        utils.growth_D_approx(COSMO_PARAMS, Z_IC)
-        / utils.growth_D_approx(COSMO_PARAMS, 0)
-    )
+    Dz_approx = utils.growth_D_approx(COSMO_PARAMS, Z_IC)
     rescaling_factor = train_config.get('rescaling_factor', Dz_approx)
     print(f'Rescaling factor: {rescaling_factor:.6f}')
 
@@ -147,7 +142,7 @@ def main():
     )
 
     # ── Reconstruct network & load weights ───────────────────────────────
-    network = gaussian_npe.Gaussian_NPE_Network(
+    network = Gaussian_NPE_Network(
         box, prior,
         sigma_noise=train_config.get('sigma_noise', 0.0),
         rescaling_factor=rescaling_factor,

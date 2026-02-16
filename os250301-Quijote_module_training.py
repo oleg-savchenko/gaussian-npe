@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 import swyft
-from gaussian_npe import utils, gaussian_npe
+from gaussian_npe import utils
+from gaussian_npe.networks import Gaussian_NPE_Network
 
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -52,7 +53,7 @@ logger = pl_loggers.TensorBoardLogger(save_dir='./logs/', name='final_logs', ver
 
 trainer = swyft.SwyftTrainer(accelerator = 'cuda', precision = 32, logger = logger, max_epochs = 30, callbacks=[lr_monitor, early_stopping_callback, checkpoint_callback])
 dm = swyft.SwyftDataModule(store, val_fraction = 0.2, num_workers = 2, batch_size = 8)
-network = gaussian_npe.Gaussian_NPE_Network(box, prior, rescaling_factor = Dz127_approx, k_cut = 0.03, w_cut = 0.001)
+network = Gaussian_NPE_Network(box, prior, rescaling_factor = Dz127_approx, k_cut = 0.03, w_cut = 0.001)
 
 # Training for 30 epochs takes approximately 1.5 hours
 network.float().cuda()

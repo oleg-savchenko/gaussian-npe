@@ -10,7 +10,7 @@ Usage:
 
     python train.py \
         --run_name baseline \
-        --store_path ./gaussian-npe/os240713-Swyft_Quijote_128_1Gpc \
+        --store_path ./os240713-Swyft_Quijote_128_1Gpc \
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --max_epochs 30 \
         --sigma_noise 0.1 \
@@ -20,7 +20,6 @@ Usage:
 """
 
 import os
-import sys
 import argparse
 import json
 import numpy as np
@@ -28,9 +27,8 @@ import torch
 import swyft
 from datetime import datetime
 
-# Add the gaussian-npe package to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'gaussian-npe'))
-from gaussian_npe import utils, gaussian_npe
+from gaussian_npe import utils
+from gaussian_npe.networks import Gaussian_NPE_Network
 
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -75,7 +73,7 @@ def parse_args():
     # ── Data ─────────────────────────────────────────────────────────────
     parser.add_argument(
         '--store_path', type=str,
-        default='./gaussian-npe/os240713-Swyft_Quijote_128_1Gpc',
+        default='./os240713-Swyft_Quijote_128_1Gpc',
         help='Path to swyft ZarrStore with Quijote simulations',
     )
 
@@ -157,12 +155,9 @@ def main():
     box = utils.Power_Spectrum_Sampler(BOX_PARAMS, device=device)
     print(f'k_Nq = {box.k_Nq:.4f} h/Mpc, k_F = {box.k_F:.6f} h/Mpc')
 
-    Dz_approx = (
-        utils.growth_D_approx(COSMO_PARAMS, Z_IC)
-        / utils.growth_D_approx(COSMO_PARAMS, 0)
-    )
+    Dz_approx = utils.growth_D_approx(COSMO_PARAMS, Z_IC)
     rescaling_factor = args.rescaling_factor if args.rescaling_factor is not None else Dz_approx
-    print(f'Rescaling factor (D(z={Z_IC})/D(z=0)): {rescaling_factor:.6f}')
+    print(f'Rescaling factor D(z={Z_IC}): {rescaling_factor:.6f}')
 
     prior = box.get_prior_Q_factors(
         lambda k: torch.tensor(
@@ -201,7 +196,7 @@ def main():
     )
 
     # ── Network ──────────────────────────────────────────────────────────
-    network = gaussian_npe.Gaussian_NPE_Network(
+    network = Gaussian_NPE_Network(
         box, prior,
         sigma_noise=args.sigma_noise,
         rescaling_factor=rescaling_factor,
