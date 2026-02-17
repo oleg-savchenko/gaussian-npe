@@ -86,6 +86,32 @@ class Precision_Matrix_FFT(GDG_Factor_Matrix):
         x = hartley(x.unflatten(-1, self.shape))
         return x
 
+class Precision_Matrix_Sum(GDG_Factor_Matrix):
+    """Sum of two precision matrices diagonal in the same basis.
+
+    Q = Q1 + Q2 = G_T * (D1 + D2) * G
+
+    The two matrices must share the same basis G (e.g. both diagonal in
+    Hartley space).  The eigenvalues D are computed dynamically as the sum
+    of the component eigenvalues, so learnable parameters in Q1 or Q2 are
+    tracked through the computation graph.
+    """
+    def __init__(self, Q1, Q2):
+        super().__init__()
+        self.Q1 = Q1
+        self.Q2 = Q2
+
+    def G(self, x):
+        return self.Q1.G(x)
+
+    @property
+    def D(self):
+        return self.Q1.D + self.Q2.D
+
+    def G_T(self, x):
+        return self.Q1.G_T(x)
+
+
 class Precision_Matrix_Single_Conv(GDG_Factor_Matrix):
     """Parametrization of a symmetric positive definite matrix.
 

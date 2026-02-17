@@ -1,4 +1,4 @@
-from gaussian_npe.Q_matrices import (
+from gaussian_npe.matrices import (
     GDG_Factor_Matrix,
     Precision_Matrix_From_Factors,
     Precision_Matrix_FFT,

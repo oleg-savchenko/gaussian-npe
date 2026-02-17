@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import swyft
 from map2map.models import UNet
-from gaussian_npe.Q_matrices import Precision_Matrix_From_Factors, Precision_Matrix_FFT
+from gaussian_npe.matrices import Precision_Matrix_From_Factors, Precision_Matrix_FFT, Precision_Matrix_Sum
 from gaussian_npe.utils import hartley
 
 class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
@@ -25,6 +25,7 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         self.prior = prior
         self.Q_prior = Precision_Matrix_From_Factors(*prior)
         self.Q_like = Precision_Matrix_FFT(self.N)
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
 
     def estimator(self, x):
         p3d = 6*(20,)
@@ -44,10 +45,59 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         z = self.rescaling_factor**-1 * z
         return self.loss(b, z)
 
+    def log_prob(self, z_MAP, z):
+        """Log-posterior on the (N³−1)-dimensional zero-mean subspace.
+
+        On a periodic box the mean overdensity is zero by construction, so
+        the k=0 (monopole) mode is not a degree of freedom.  The posterior is
+        an (N³−1)-dimensional Gaussian over zero-mean fields:
+
+            log p(z|x) = −(N³−1)/2·log(2π)
+                         + ½ Σ_{k≠0} log D_post[k]
+                         − ½ Σ_{k≠0} D_post[k]·r_h[k]²
+
+        Both the quadratic and log-determinant terms exclude k=0 explicitly
+        via indexing in Hartley space.
+
+        Args:
+            z_MAP: MAP estimate (B, N, N, N)
+            z:     target field  (B, N, N, N)
+
+        Returns:
+            (B,) tensor of per-sample log-probabilities.
+        """
+        r = z - z_MAP
+        r_h = self.Q_post.G(r)                          # (B, N³)
+        D = self.Q_post.D                                # (N³,)
+
+        # Exclude k=0 mode
+        n_modes = D.numel() - 1
+        quad   = -0.5 * (D[1:] * r_h[:, 1:]**2).sum(dim=-1)
+        logdet =  0.5 * torch.log(D[1:]).sum()
+        norm   = -0.5 * n_modes * torch.tensor(2 * torch.pi).log()
+
+        return norm + logdet + quad
+
     def loss(self, z_MAP, z):
-        """Calculates the loss function."""
-        loss = 0.5 * ((z - z_MAP)*(self.Q_like(z - z_MAP) + self.Q_prior(z - z_MAP))).mean(dim=(-3, -2, -1)) - 0.5 * torch.log(self.Q_like.D + self.Q_prior.D).mean(dim=-1)
-        return swyft.AuxLoss(loss.reshape(-1), 'z')
+        """Per-mode normalised negative log-posterior, for training.
+
+        Returns −log p / (N³−1) per sample, wrapped in swyft.AuxLoss.
+        """
+        n_modes = self.Q_post.D.numel() - 1
+        return swyft.AuxLoss(-self.log_prob(z_MAP, z) / n_modes, 'z')
+
+    def loss_legacy(self, z_MAP, z):
+        """Original real-space loss over the full N³ grid (including k=0).
+
+        Computes the quadratic and log-det terms in real space using the
+        Q-matrix interface.  All N³ Hartley modes contribute, so the k=0
+        mode — whose prior precision D_prior[0] is very large — can dominate
+        the loss if the residual has a nonzero spatial mean (e.g. from
+        training noise).
+        """
+        r = z - z_MAP
+        loss = 0.5 * (r*(self.Q_like(r) + self.Q_prior(r))).mean(dim=(-3, -2, -1)) - 0.5 * torch.log(self.Q_like.D + self.Q_prior.D).mean(dim=-1)
+        return swyft.AuxLoss(loss, 'z')
 
     def get_z_MAP(self, x_obs):
         """Returns the MAP estimation for a given x_obs."""
@@ -81,8 +131,8 @@ class Gaussian_NPE_WienerNet(Gaussian_NPE_Network):
     dominates, without an arbitrary k_cut.
     """
 
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut)
+    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001, **kwargs):
+        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
         # scale parameter is inherited but unused; Wiener weights come from D_like/D_prior
 
     def estimator(self, x):
@@ -116,8 +166,8 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Network):
     sigmoid baseline.
     """
 
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut)
+    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001, **kwargs):
+        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
 
         # Initialize filter_logit so that sigmoid(filter_logit) == sigmoid((k - k_cut) / w_cut)
         # i.e. filter_logit = (k - k_cut) / w_cut
@@ -159,8 +209,8 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Network):
     """
 
     def __init__(self, box, prior, sigma_noise, rescaling_factor,
-                 k_cut=0.03, w_cut=0.001, num_iterations=3):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut)
+                 k_cut=0.03, w_cut=0.001, num_iterations=3, **kwargs):
+        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
         self.num_iterations = num_iterations
         # Override U-Net: 2 input channels (current estimate + observation)
         self.unet = UNet(2, 1, hid_chan=16, bypass=False)
@@ -198,8 +248,8 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
     Z_IC = 127
 
     def __init__(self, box, prior, sigma_noise, rescaling_factor=1.0,
-                 k_cut=0.03, w_cut=0.001):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut)
+                 k_cut=0.03, w_cut=0.001, **kwargs):
+        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
 
     @staticmethod
     def _growth_D_tensor(Omega_m, z):

@@ -353,6 +353,20 @@ def main():
     print(f'Plots saved to {os.path.join(plots_dir, run_label)}')
     plt.close('all')
 
+    print('Running calibration diagnostics...')
+    utils.plot_calibration_diagnostics(
+        delta_z127=delta_z127 / rescaling_factor,
+        z_MAP=z_MAP_np / rescaling_factor,
+        samples=np.array(samples) / rescaling_factor,
+        box=box,
+        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+        save_dir=plots_dir,
+        run_name=run_label,
+    )
+    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, run_label)}')
+    plt.close('all')
+
     print(f'\nRun complete. All outputs saved to {output_dir}')
 
 

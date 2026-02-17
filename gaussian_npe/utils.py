@@ -56,6 +56,11 @@ def hartley(x, dim = (-3, -2, -1)):
     fx = torch.fft.fftn(x, dim = dim, norm = 'ortho')
     return (fx.real - fx.imag)
 
+def hartley_np(x, axes=(-3, -2, -1)):
+    """Numpy Hartley transform (matches the torch version)."""
+    fx = np.fft.fftn(x, axes=axes, norm='ortho')
+    return fx.real - fx.imag
+
 class Power_Spectrum_Sampler:
     def __init__(self, box_parameters, device = 'cuda', dim = 3):
         self.box_size = box_parameters['box_size']
@@ -92,7 +97,7 @@ class Power_Spectrum_Sampler:
         k_safe = k_flat.clone()
         k_safe[0] = self.k_F
         D = (pk(k_safe) * (self.N / self.box_size) ** self.dim) ** -1
-        # DC mode (k=0): mean overdensity is zero by construction on a
+        # monopole mode (k=0): mean overdensity is zero by construction on a
         # periodic box, so the prior precision is effectively infinite.
         D[0] = 1e12
         U = lambda x: hartley(x, dim = self.hartley_dim).flatten(-len(self.shape), -1)
@@ -166,6 +171,7 @@ def plot_training_curves(metrics_file, save_path, title=''):
         print(f'No data in metrics file: {metrics_file}')
         return
 
+    rows = [r for r in rows if r['train_loss'] and r['val_loss']]
     epochs = np.array([int(r['epoch']) for r in rows])
     train_loss = np.array([float(r['train_loss']) for r in rows])
     val_loss = np.array([float(r['val_loss']) for r in rows])
@@ -177,7 +183,7 @@ def plot_training_curves(metrics_file, save_path, title=''):
     ax1.plot(epochs, val_loss, label='Val loss')
     best = int(np.argmin(val_loss))
     ax1.scatter(epochs[best], val_loss[best],
-                marker='*', s=120, color='red', zorder=10,
+                marker='*', s=120, color='goldenrod', zorder=10,
                 label=f'Best val: {val_loss[best]:.4f}')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
@@ -492,6 +498,240 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         ax.grid(alpha=0.15)
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f'Q_diagonals_{run_name}.png'), bbox_inches='tight')
+
+
+def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
+                                  Q_like_D, Q_prior_D,
+                                  save_dir='./plots', run_name=''):
+    """Posterior calibration diagnostics in Hartley space.
+
+    Produces three figures and a summary text file:
+      1. Log-probability histogram: distribution of log p(sample | x) with
+         log p(z_true | x) marked.
+      2. Per-mode chi-squared vs |k|: binned mean of D_post[k] * r_h[k]^2.
+      3. True vs predicted Hartley modes: scatter with +/-2 sigma error bars.
+      4. calibration_summary.txt: scalar metrics.
+
+    All inputs must be in internal space (i.e. divided by rescaling_factor).
+
+    Parameters
+    ----------
+    delta_z127 : np.ndarray, shape (N, N, N)
+        True initial conditions field.
+    z_MAP : np.ndarray, shape (N, N, N)
+        MAP estimate.
+    samples : np.ndarray, shape (n_samples, N, N, N)
+        Posterior samples.
+    box : Power_Spectrum_Sampler
+        Box object (for k-grid, k_F, k_Nq).
+    Q_like_D : np.ndarray, shape (N^3,)
+        Diagonal of the likelihood precision matrix.
+    Q_prior_D : np.ndarray, shape (N^3,)
+        Diagonal of the prior precision matrix.
+    save_dir : str
+        Directory to save the output plots.
+    run_name : str
+        Suffix appended to filenames.
+    """
+    out_dir = os.path.join(save_dir, run_name) if run_name else save_dir
+    os.makedirs(out_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    delta_z127 = delta_z127.astype('f')
+    z_MAP = z_MAP.astype('f')
+    samples = np.asarray(samples).astype('f')
+
+    k_flat = box.k.cpu().numpy().flatten()
+    k_Nq = box.k_Nq
+    k_F = box.k_F
+
+    # ── Precomputation ────────────────────────────────────────────────────
+    D_post = Q_like_D + Q_prior_D               # (N³,)
+    n_modes = D_post.size - 1                    # N³ - 1 (excluding k=0)
+    D_k = D_post[1:]                             # (n_modes,)
+    k_modes = k_flat[1:]                         # (n_modes,)
+
+    z_true_h = hartley_np(delta_z127).ravel()    # (N³,)
+    z_MAP_h = hartley_np(z_MAP).ravel()          # (N³,)
+    r_true_h = (z_true_h - z_MAP_h)[1:]          # (n_modes,)
+
+    # Log-probability computation (float64 for precision)
+    log_D_k = np.log(D_k.astype(np.float64))
+    logdet_half = 0.5 * log_D_k.sum()
+    norm_const = -0.5 * n_modes * np.log(2 * np.pi)
+
+    def _log_prob_np(r_h_excl_k0):
+        """Log-prob from Hartley residual (k!=0 modes), shape (n_modes,)."""
+        quad = -0.5 * (D_k * r_h_excl_k0**2).sum()
+        return norm_const + logdet_half + quad
+
+    log_p_true = _log_prob_np(r_true_h)
+
+    sample_log_probs = np.empty(len(samples))
+    for i, s in enumerate(samples):
+        r_s_h = (hartley_np(s).ravel() - z_MAP_h)[1:]
+        sample_log_probs[i] = _log_prob_np(r_s_h)
+
+    # Expected log-prob: E[-0.5 * sum(D_k * r²)] = -0.5 * n_modes
+    expected_log_p = norm_const + logdet_half - 0.5 * n_modes
+    expected_std = np.sqrt(n_modes / 2.0)
+
+    # ── Figure 1: log-probability histogram ───────────────────────────────
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(sample_log_probs, bins=30, density=True, alpha=0.7,
+            color='steelblue', edgecolor='white', label='Posterior samples')
+    ax.axvline(log_p_true, color='red', ls='--', lw=2,
+               label=f'log p(z_true) = {log_p_true:.0f}')
+    ax.axvline(expected_log_p, color='grey', ls='--', lw=1.5,
+               label=f'Expected mean = {expected_log_p:.0f}')
+
+    ax.axvspan(expected_log_p - expected_std, expected_log_p + expected_std,
+               alpha=0.1, color='grey')
+
+    sample_mean = sample_log_probs.mean()
+    sample_std = sample_log_probs.std(ddof=1)
+    z_score_true = (log_p_true - sample_mean) / sample_std if sample_std > 0 else np.nan
+
+    txt = (
+        f'Sample mean: {sample_mean:.0f}\n'
+        f'Sample std: {sample_std:.0f}\n'
+        f'z-score(z_true): {z_score_true:.2f}\n\n'
+        r'Well-calibrated $\Rightarrow$ log p(z$_{\rm true}$)' '\n'
+        'within the sample distribution'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xlabel(r'$\log\, p(z \mid x)$', fontsize=14)
+    ax.set_ylabel('Density', fontsize=14)
+    ax.set_title('Log-posterior distribution')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'log_prob_histogram_{run_name}.png'), bbox_inches='tight')
+
+    # ── Figure 2: per-mode chi-squared vs |k| ─────────────────────────────
+    chi2_true = D_k * r_true_h**2
+
+    chi2_samples = np.empty((len(samples), n_modes))
+    for i, s in enumerate(samples):
+        r_s_h = (hartley_np(s).ravel() - z_MAP_h)[1:]
+        chi2_samples[i] = D_k * r_s_h**2
+    chi2_sample_mean = chi2_samples.mean(axis=0)
+
+    k_bin_edges = np.logspace(np.log10(k_F), np.log10(k_Nq), 31)
+    k_bin_centers = np.sqrt(k_bin_edges[:-1] * k_bin_edges[1:])
+
+    chi2_binned_true = np.full(len(k_bin_centers), np.nan)
+    chi2_binned_samp = np.full(len(k_bin_centers), np.nan)
+    expected_scatter = np.full(len(k_bin_centers), np.nan)
+    for i in range(len(k_bin_centers)):
+        in_bin = (k_modes >= k_bin_edges[i]) & (k_modes < k_bin_edges[i + 1])
+        n_bin = in_bin.sum()
+        if n_bin > 0:
+            chi2_binned_true[i] = chi2_true[in_bin].mean()
+            chi2_binned_samp[i] = chi2_sample_mean[in_bin].mean()
+            expected_scatter[i] = np.sqrt(2.0 / n_bin)
+
+    valid = ~np.isnan(chi2_binned_true)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(k_bin_centers[valid], chi2_binned_true[valid],
+            'o-', markersize=4, lw=1.5, color='red', label=r'Truth: $\langle D_k\, r_k^2 \rangle_k$')
+    ax.plot(k_bin_centers[valid], chi2_binned_samp[valid],
+            's-', markersize=3, lw=1, color='steelblue', alpha=0.7,
+            label=r'Samples (averaged)')
+    ax.fill_between(k_bin_centers[valid],
+                     1 - expected_scatter[valid], 1 + expected_scatter[valid],
+                     alpha=0.2, color='grey', label=r'Expected $\pm 1\sigma$')
+    ax.axhline(1.0, color='k', ls='--', lw=0.8)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm Nyq}$')
+
+    reduced_chi2 = chi2_true.mean()
+    txt = (
+        f'Reduced $\\chi^2$ (truth) = {reduced_chi2:.3f}\n\n'
+        r'Well-calibrated $\Rightarrow$ binned mean $\approx 1$' '\n'
+        r'$> 1$: overconfident (too narrow)' '\n'
+        r'$< 1$: underconfident (too wide)'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xscale('log')
+    ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
+    ax.set_ylabel(r'$\langle D_{\rm post}(k)\, r_h(k)^2 \rangle$', fontsize=14)
+    ax.set_title(r'Per-mode $\chi^2$ diagnostic')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'chi2_per_k_{run_name}.png'), bbox_inches='tight')
+
+    # ── Figure 3: true vs predicted Hartley modes ─────────────────────────
+    # Stratified mode selection: ~50 per k-bin, ~1000 total
+    rng_modes = np.random.default_rng(0)
+    k_sel_bins = np.logspace(np.log10(k_F), np.log10(k_Nq), 21)
+    selected = []
+    for i in range(len(k_sel_bins) - 1):
+        in_bin = np.where((k_modes >= k_sel_bins[i]) & (k_modes < k_sel_bins[i + 1]))[0]
+        n_pick = min(50, len(in_bin))
+        if n_pick > 0:
+            selected.append(rng_modes.choice(in_bin, n_pick, replace=False))
+    selected = np.concatenate(selected)
+
+    sel_true = z_true_h[1:][selected]
+    sel_pred = z_MAP_h[1:][selected]
+    sel_sigma = D_k[selected]**-0.5
+    sel_k = k_modes[selected]
+
+    within_2sigma = np.abs(sel_true - sel_pred) < 2 * sel_sigma
+    coverage_2sigma = within_2sigma.mean()
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    sc = ax.scatter(sel_true, sel_pred, c=np.log10(sel_k), cmap='viridis',
+                    s=4, alpha=0.6, zorder=5)
+    ax.errorbar(sel_true, sel_pred, yerr=2 * sel_sigma,
+                fmt='none', ecolor='grey', elinewidth=0.3, alpha=0.3, zorder=1)
+
+    lim = max(np.abs(sel_true).max(), np.abs(sel_pred).max()) * 1.1
+    ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.8, alpha=0.5)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect('equal')
+
+    cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label(r'$\log_{10}\,k~[h\,{\rm Mpc}^{-1}]$', fontsize=12)
+
+    txt = (
+        f'2$\\sigma$ coverage: {coverage_2sigma:.1%}\n'
+        f'(N modes shown: {len(selected)})\n\n'
+        r'Well-calibrated $\Rightarrow$ ~95% coverage' '\n'
+        'and symmetric scatter around diagonal'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xlabel(r'$z_{\rm true}^{(H)}(k)$', fontsize=14)
+    ax.set_ylabel(r'$z_{\rm MAP}^{(H)}(k)$', fontsize=14)
+    ax.set_title(r'True vs predicted Hartley modes ($\pm 2\sigma$)')
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'hartley_modes_{run_name}.png'), bbox_inches='tight')
+
+    # ── Calibration summary text file ─────────────────────────────────────
+    summary_path = os.path.join(out_dir, f'calibration_summary_{run_name}.txt')
+    with open(summary_path, 'w') as f_sum:
+        f_sum.write(f'Calibration summary: {run_name}\n')
+        f_sum.write(f'{"=" * 50}\n\n')
+        f_sum.write(f'N_modes (N^3 - 1):          {n_modes}\n')
+        f_sum.write(f'Reduced chi2 (truth):       {reduced_chi2:.6f}\n')
+        f_sum.write(f'log p(z_true | x):          {log_p_true:.2f}\n')
+        f_sum.write(f'Expected mean log p:        {expected_log_p:.2f}\n')
+        f_sum.write(f'Expected std log p:         {expected_std:.2f}\n')
+        f_sum.write(f'Sample mean log p:          {sample_mean:.2f}\n')
+        f_sum.write(f'Sample std log p:           {sample_std:.2f}\n')
+        f_sum.write(f'z-score(z_true):            {z_score_true:.4f}\n')
+        f_sum.write(f'2-sigma coverage (modes):   {coverage_2sigma:.4f} ({coverage_2sigma:.1%})\n')
+
 
 def plot_1pt_pdf_with_skew_kurt(
     delta,              # (N,N,N) true field
