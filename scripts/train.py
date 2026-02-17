@@ -11,22 +11,25 @@ Usage:
     python scripts/train.py \
         --run_name baseline \
         --output_dir ./runs \
+        --network default \
         --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_fiducial_res128_deconv_MAK \
         --max_epochs 30 \
         --rescaling_factor 0.009908314998484411 \
         --k_cut 0.03 \
         --w_cut 0.001 \
         --sigma_noise 0.1 \
+        --n_train 500 \
         --learning_rate 0.01 \
         --early_stopping_patience 5 \
         --lr_scheduler_patience 1 \
         --batch_size 8 \
         --val_fraction 0.2 \
-        --num_workers 2 \
+        --num_workers 16 \
         --precision 32 \
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 100 \
-        --MAS PCS
+        --MAS PCS \
+        --noise_seed 42
 """
 
 import os
@@ -38,13 +41,29 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+torch.set_float32_matmul_precision('high')
 import swyft
+import time
 from datetime import datetime
 
-from gaussian_npe import utils, Gaussian_NPE_Network
+from gaussian_npe import (
+    utils,
+    Gaussian_NPE_Network,
+    Gaussian_NPE_WienerNet,
+    Gaussian_NPE_LearnableFilter,
+    Gaussian_NPE_Iterative,
+    Gaussian_NPE_LH,
+)
 
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+NETWORK_CLASSES = {
+    'default': Gaussian_NPE_Network,
+    'WienerNet': Gaussian_NPE_WienerNet,
+    'LearnableFilter': Gaussian_NPE_LearnableFilter,
+    'Iterative': Gaussian_NPE_Iterative,
+    'LH': Gaussian_NPE_LH,
+}
+
+from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning import loggers as pl_loggers
 
 
@@ -81,6 +100,11 @@ def parse_args():
     parser.add_argument(
         '--output_dir', type=str, default='./runs',
         help='Base output directory',
+    )
+    parser.add_argument(
+        '--network', type=str, default='default',
+        choices=list(NETWORK_CLASSES.keys()),
+        help='Network architecture to train',
     )
 
     # ── Data ─────────────────────────────────────────────────────────────
@@ -125,6 +149,11 @@ def parse_args():
         help='ReduceLROnPlateau patience (epochs before reducing LR)',
     )
     parser.add_argument(
+        '--n_train', type=int, default=None,
+        help='Number of simulations to use (first n_train from the store). '
+             'If not set, uses all available simulations.',
+    )
+    parser.add_argument(
         '--batch_size', type=int, default=8,
         help='Training batch size',
     )
@@ -133,7 +162,7 @@ def parse_args():
         help='Validation fraction',
     )
     parser.add_argument(
-        '--num_workers', type=int, default=2,
+        '--num_workers', type=int, default=16,
         help='Number of data loader workers',
     )
     parser.add_argument(
@@ -155,6 +184,10 @@ def parse_args():
     parser.add_argument(
         '--MAS', type=str, default=None,
         help='Mass assignment scheme for Pylians (e.g. PCS). None = no correction',
+    )
+    parser.add_argument(
+        '--noise_seed', type=int, default=42,
+        help='Random seed for the observational noise added to the target field',
     )
 
     return parser.parse_args()
@@ -209,22 +242,22 @@ def main():
     print(f'Number of simulations in the store: {len(store)}')
 
     # ── Callbacks & logger ───────────────────────────────────────────────
+    # Note: EarlyStopping and ModelCheckpoint are provided by swyft's
+    # AdamWReduceLROnPlateau.configure_callbacks() using the network's
+    # early_stopping_patience and lr_scheduler_patience attributes.
     log_dir = os.path.join(output_dir, 'logs')
     lr_monitor = LearningRateMonitor(logging_interval='step')
-    early_stopping = EarlyStopping(
-        monitor='val_loss', min_delta=0., patience=3, verbose=False, mode='min',
-    )
-    checkpoint = ModelCheckpoint(
-        dirpath=log_dir,
-        filename='best_{epoch}_{val_loss:.2f}',
-        monitor='val_loss', mode='min', save_last=True,
-    )
     tb_logger = pl_loggers.TensorBoardLogger(
         save_dir=log_dir, name='tb_logs', version=None,
     )
+    csv_logger = pl_loggers.CSVLogger(
+        save_dir=log_dir, name='csv_logs', version=None,
+    )
 
     # ── Network ──────────────────────────────────────────────────────────
-    network = Gaussian_NPE_Network(
+    NetworkClass = NETWORK_CLASSES[args.network]
+    print(f'Network: {NetworkClass.__name__}')
+    network = NetworkClass(
         box, prior,
         sigma_noise=args.sigma_noise,
         rescaling_factor=rescaling_factor,
@@ -240,9 +273,9 @@ def main():
     trainer = swyft.SwyftTrainer(
         accelerator='cuda' if device == 'cuda' else 'cpu',
         precision=args.precision,
-        logger=tb_logger,
+        logger=[tb_logger, csv_logger],
         max_epochs=args.max_epochs,
-        callbacks=[lr_monitor, early_stopping, checkpoint],
+        callbacks=[lr_monitor],
     )
     dm = swyft.SwyftDataModule(
         store,
@@ -251,10 +284,35 @@ def main():
         batch_size=args.batch_size,
     )
 
+    # Limit to first n_train simulations if requested
+    if args.n_train is not None:
+        n_use = min(args.n_train, len(store))
+        n_val = int(np.floor(n_use * args.val_fraction))
+        n_train = n_use - n_val
+        dm.lengths = [n_train, n_val, 0]
+        print(f'Using {n_train} train + {n_val} val = {n_use} of {len(store)} simulations')
+
     # ── Train ────────────────────────────────────────────────────────────
     print(f'\nStarting training for up to {args.max_epochs} epochs...')
+    t_start = time.time()
+
     trainer.fit(network, dm)
-    print('Training complete.')
+    
+    t_train = time.time() - t_start
+    h, m, s = int(t_train // 3600), int(t_train % 3600 // 60), int(t_train % 60)
+    print(f'Training complete in {h}h {m}m {s}s.')
+
+    # ── Plot training curves ─────────────────────────────────────────────
+    plots_dir = os.path.join(output_dir, 'plots')
+    plots_run_dir = os.path.join(plots_dir, run_label)
+    os.makedirs(plots_run_dir, exist_ok=True)
+
+    utils.plot_training_curves(
+        metrics_file=os.path.join(csv_logger.log_dir, 'metrics.csv'),
+        save_path=os.path.join(plots_run_dir, f'training_curves_{run_label}.png'),
+        title=f'{run_label} — trained in {h}h {m}m {s}s',
+    )
+    print(f'Training curves saved to {plots_run_dir}')
 
     # ── Save model ───────────────────────────────────────────────────────
     model_path = os.path.join(output_dir, 'model.pt')
@@ -270,14 +328,17 @@ def main():
     delta_z0 = sample0['delta_z0'].astype('f')
     delta_z127 = sample0['delta_z127'].astype('f')
 
+    rng = np.random.default_rng(args.noise_seed)
+    delta_obs = delta_z0 + rng.standard_normal(delta_z0.shape).astype('f') * args.sigma_noise
+    print(f'Added observational noise (sigma={args.sigma_noise}, seed={args.noise_seed})')
+
     with torch.no_grad():
-        z_MAP = network.get_z_MAP(torch.from_numpy(delta_z0).to(device).float())
+        z_MAP = network.get_z_MAP(torch.from_numpy(delta_obs).to(device).float())
         samples = network.sample(args.num_samples, z_MAP=z_MAP)
 
     z_MAP_np = z_MAP.cpu().numpy()
 
     print('Plotting analysis...')
-    plots_dir = os.path.join(output_dir, 'plots')
     utils.plot_samples_analysis(
         delta_z127=delta_z127 / rescaling_factor,
         delta_z0=delta_z0,
@@ -286,6 +347,8 @@ def main():
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,
+        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
         save_dir=plots_dir,
         run_name=run_label,
     )

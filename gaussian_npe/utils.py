@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import torch
 import Pk_library as PKL
 from classy import Class
@@ -75,7 +76,6 @@ class Power_Spectrum_Sampler:
         freq = torch.fft.fftfreq(self.N, d = d, device = device)
         kx, ky, kz = torch.meshgrid(freq, freq, freq, indexing = 'ij')
         k = (kx**2 + ky**2 + kz**2)**0.5
-        k[0,0,0] = k[0,0,1]*1e-9    # Offset to avoid singularities (i.e., now k has no entries with zeros)
         return k
 
     def get_prior_Q_factors(self, pk):
@@ -86,7 +86,14 @@ class Power_Spectrum_Sampler:
         Returns:
             UT, D, U: Linear operator, tensor, linear operator.
         """
-        D = (pk(self.k.cpu().flatten()) * (self.N/self.box_size)**self.dim)**-1
+        k_flat = self.k.cpu().flatten()
+        # Replace k=0 with a dummy for the pk() call to avoid P(0)=0 → 1/0
+        k_safe = k_flat.clone()
+        k_safe[0] = self.k_F
+        D = (pk(k_safe) * (self.N / self.box_size) ** self.dim) ** -1
+        # DC mode (k=0): mean overdensity is zero by construction on a
+        # periodic box, so the prior precision is effectively infinite.
+        D[0] = 1e12
         U = lambda x: hartley(x, dim = self.hartley_dim).flatten(-len(self.shape), -1)
         UT = lambda x: hartley(x.unflatten(-1, self.shape), dim = self.hartley_dim)
         return UT, D, U
@@ -135,18 +142,75 @@ class Power_Spectrum_Sampler:
         return k_pylians, pk_pylians
 
 
+def plot_training_curves(metrics_file, save_path, title=''):
+    """Plot training/validation loss and learning rate from a CSVLogger metrics file.
+
+    Parameters
+    ----------
+    metrics_file : str
+        Path to the metrics.csv file written by pytorch_lightning.loggers.CSVLogger.
+    save_path : str
+        Full path (including filename) where the figure will be saved.
+    title : str
+        Figure suptitle.
+    """
+    if not os.path.exists(metrics_file):
+        print(f'Metrics file not found: {metrics_file}')
+        return
+
+    df = pd.read_csv(metrics_file)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Loss curves (per epoch)
+    if 'train_loss' in df.columns:
+        train = df.dropna(subset=['train_loss'])
+        ax1.plot(train['epoch'], train['train_loss'], label='Train loss')
+    if 'val_loss' in df.columns:
+        val = df.dropna(subset=['val_loss'])
+        ax1.plot(val['epoch'], val['val_loss'], label='Val loss')
+        best_idx = val['val_loss'].idxmin()
+        ax1.scatter(val.loc[best_idx, 'epoch'], val.loc[best_idx, 'val_loss'],
+                    marker='*', s=120, color='red', zorder=10,
+                    label=f'Best val: {val.loc[best_idx, "val_loss"]:.4f}')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(alpha=0.15)
+    ax1.set_title('Training & validation loss')
+
+    # Learning rate (per step)
+    lr_cols = [c for c in df.columns if c.startswith('lr-')]
+    if lr_cols:
+        lr_col = lr_cols[0]
+        lr_df = df.dropna(subset=[lr_col])
+        ax2.plot(lr_df['step'], lr_df[lr_col])
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('Learning rate')
+        ax2.set_yscale('log')
+        ax2.grid(alpha=0.15)
+        ax2.set_title('Learning rate schedule')
+
+    if title:
+        fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(save_path, bbox_inches='tight')
+    plt.close(fig)
+
+
 def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
+                          Q_like_D=None, Q_prior_D=None,
                           save_dir='./plots', run_name=''):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
 
-    Produces five figures:
+    Produces up to six figures:
       1. Field slices: true IC, one posterior sample, and residual (3x3 grid).
       2. Truth vs MAP vs posterior std (1x3).
       3. Summary statistics: power spectrum, transfer function, and cross-correlation
          of the samples and MAP estimate relative to the ground truth, with 1/2-sigma bands.
       4. 1-point PDF comparison with skewness and kurtosis annotations.
       5. Reduced bispectrum Q(theta) for two triangle configurations.
+      6. Precision matrix diagonals D_like, D_prior, D_posterior vs k (if provided).
 
     Parameters
     ----------
@@ -164,6 +228,11 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         Cosmological parameters for CLASS. If provided, the linear theory P(k) is shown.
     MAS : str, optional
         Mass assignment scheme for Pylians (e.g. 'PCS'). Default None (no correction).
+    Q_like_D : np.ndarray, shape (N^3,), optional
+        Diagonal of the likelihood precision matrix. If provided together with
+        Q_prior_D, an additional Q-matrix diagnostic plot is produced.
+    Q_prior_D : np.ndarray, shape (N^3,), optional
+        Diagonal of the prior precision matrix.
     save_dir : str
         Directory to save the output plots.
     run_name : str
@@ -396,6 +465,29 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f'bispectrum_{run_name}.png'), bbox_inches='tight')
 
+    # ── Figure 6: Q-matrix diagonals vs k ─────────────────────────────────
+    if Q_like_D is not None and Q_prior_D is not None:
+        k_flat = box.k.cpu().numpy().flatten()
+        mask = (k_flat < k_Nq) & (k_flat > 1e-3)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.scatter(k_flat[mask], Q_like_D[mask], s=0.5, alpha=0.4,
+                   label=r'$D_{\rm like}$')
+        ax.scatter(k_flat[mask], Q_prior_D[mask], s=0.5, alpha=0.4,
+                   label=r'$D_{\rm prior}$')
+        ax.scatter(k_flat[mask], Q_like_D[mask] + Q_prior_D[mask], s=0.5, alpha=0.3,
+                   label=r'$D_{\rm posterior}$')
+        ax.axvline(x=k_Nq, color='r', linestyle='--', lw=1, label=r'$k_{\rm Nyq}$')
+
+        ax.set_xscale('log')
+        ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
+        ax.set_ylabel(r'$D(k)$', fontsize=14)
+        ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
+        ax.legend(loc='best', markerscale=8)
+        ax.grid(alpha=0.15)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f'Q_diagonals_{run_name}.png'), bbox_inches='tight')
+
 def plot_1pt_pdf_with_skew_kurt(
     delta,              # (N,N,N) true field
     samples,            # (B,N,N,N) reconstructed samples
@@ -464,12 +556,12 @@ def plot_1pt_pdf_with_skew_kurt(
     # Plot
     fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=150)
 
-    ax.plot(centers, h_mean_plot, lw=2.0, label=r'$\pi(x_i\,|\,\mathbf{d})$')
-    ax.plot(centers, h_true_plot, lw=2.0, ls='--', color='k', label=r'$\pi(x^{\mathrm{truth}})$')
+    ax.plot(centers, h_mean_plot, lw=2.0, label=r'$p(z_i\,|\,\mathbf{x}_{\rm obs})$')
+    ax.plot(centers, h_true_plot, lw=2.0, ls='--', color='k', label=r'$p(z^{\rm truth})$')
 
     ax.set_xlim(*xlim)
-    ax.set_xlabel(r'$x$')
-    ax.set_ylabel(r'$\pi(x_i\,|\,\mathbf{d})$')
+    ax.set_xlabel(r'$z$')
+    ax.set_ylabel(r'$p(z_i\,|\,\mathbf{x}_{\rm obs})$')
 
     if title is not None:
         ax.set_title(title)

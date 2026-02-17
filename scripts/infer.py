@@ -13,7 +13,8 @@ Usage:
         --output_dir ./runs/infer_outputs \
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 200 \
-        --MAS PCS
+        --MAS PCS \
+        --noise_seed 42
 """
 
 import os
@@ -87,6 +88,10 @@ def parse_args():
     parser.add_argument(
         '--MAS', type=str, default=None,
         help='Mass assignment scheme for Pylians (e.g. PCS). None = no correction',
+    )
+    parser.add_argument(
+        '--noise_seed', type=int, default=42,
+        help='Random seed for the observational noise added to the target field',
     )
 
     return parser.parse_args()
@@ -171,6 +176,8 @@ def main():
         'model_dir': args.model_dir,
         'target_path': target_path,
         'num_samples': args.num_samples,
+        'noise_seed': args.noise_seed,
+        'sigma_noise': sigma_noise,
         'MAS': args.MAS,
         'device': device,
         'rescaling_factor': rescaling_factor,
@@ -185,10 +192,15 @@ def main():
     delta_z0 = sample0['delta_z0'].astype('f')
     delta_z127 = sample0['delta_z127'].astype('f')
 
+    sigma_noise = train_config.get('sigma_noise', 0.0)
+    rng = np.random.default_rng(args.noise_seed)
+    delta_obs = delta_z0 + rng.standard_normal(delta_z0.shape).astype('f') * sigma_noise
+    print(f'Added observational noise (sigma={sigma_noise}, seed={args.noise_seed})')
+
     # ── Generate MAP & posterior samples ──────────────────────────────────
     print(f'Generating {args.num_samples} posterior samples...')
     with torch.no_grad():
-        z_MAP = network.get_z_MAP(torch.from_numpy(delta_z0).to(device).float())
+        z_MAP = network.get_z_MAP(torch.from_numpy(delta_obs).to(device).float())
         samples = network.sample(args.num_samples, z_MAP=z_MAP)
 
     z_MAP_np = z_MAP.cpu().numpy()
@@ -204,6 +216,8 @@ def main():
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,
+        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
         save_dir=plots_dir,
         run_name=run_label,
     )
