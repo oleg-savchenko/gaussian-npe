@@ -1,5 +1,5 @@
 import numpy as np
-import pandas as pd
+import csv
 import torch
 import Pk_library as PKL
 from classy import Class
@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import os
 from scipy.stats import skew, kurtosis
 from scipy.ndimage import gaussian_filter1d  # just for smoothing the histogram curves
+from pytorch_lightning.callbacks import Callback
 
 def get_pk_class(cosmo_params, z, k, non_lin = False):
     """While cosmo_params is the cosmological parameters, z is a single redshift,
@@ -143,12 +144,12 @@ class Power_Spectrum_Sampler:
 
 
 def plot_training_curves(metrics_file, save_path, title=''):
-    """Plot training/validation loss and learning rate from a CSVLogger metrics file.
+    """Plot training/validation loss and learning rate from a metrics CSV.
 
     Parameters
     ----------
     metrics_file : str
-        Path to the metrics.csv file written by pytorch_lightning.loggers.CSVLogger.
+        Path to metrics.csv (one row per epoch: epoch,step,train_loss,val_loss,lr).
     save_path : str
         Full path (including filename) where the figure will be saved.
     title : str
@@ -158,33 +159,37 @@ def plot_training_curves(metrics_file, save_path, title=''):
         print(f'Metrics file not found: {metrics_file}')
         return
 
-    df = pd.read_csv(metrics_file)
+    with open(metrics_file, 'r') as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        print(f'No data in metrics file: {metrics_file}')
+        return
+
+    epochs = np.array([int(r['epoch']) for r in rows])
+    train_loss = np.array([float(r['train_loss']) for r in rows])
+    val_loss = np.array([float(r['val_loss']) for r in rows])
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
-    # Loss curves (per epoch)
-    if 'train_loss' in df.columns:
-        train = df.dropna(subset=['train_loss'])
-        ax1.plot(train['epoch'], train['train_loss'], label='Train loss')
-    if 'val_loss' in df.columns:
-        val = df.dropna(subset=['val_loss'])
-        ax1.plot(val['epoch'], val['val_loss'], label='Val loss')
-        best_idx = val['val_loss'].idxmin()
-        ax1.scatter(val.loc[best_idx, 'epoch'], val.loc[best_idx, 'val_loss'],
-                    marker='*', s=120, color='red', zorder=10,
-                    label=f'Best val: {val.loc[best_idx, "val_loss"]:.4f}')
+    # Loss curves
+    ax1.plot(epochs, train_loss, label='Train loss')
+    ax1.plot(epochs, val_loss, label='Val loss')
+    best = int(np.argmin(val_loss))
+    ax1.scatter(epochs[best], val_loss[best],
+                marker='*', s=120, color='red', zorder=10,
+                label=f'Best val: {val_loss[best]:.4f}')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
     ax1.legend()
     ax1.grid(alpha=0.15)
     ax1.set_title('Training & validation loss')
 
-    # Learning rate (per step)
-    lr_cols = [c for c in df.columns if c.startswith('lr-')]
-    if lr_cols:
-        lr_col = lr_cols[0]
-        lr_df = df.dropna(subset=[lr_col])
-        ax2.plot(lr_df['step'], lr_df[lr_col])
-        ax2.set_xlabel('Step')
+    # Learning rate (per epoch)
+    if 'lr' in rows[0]:
+        lr_vals = np.array([float(r['lr']) for r in rows])
+        ax2.plot(epochs, lr_vals)
+        ax2.set_xlabel('Epoch')
         ax2.set_ylabel('Learning rate')
         ax2.set_yscale('log')
         ax2.grid(alpha=0.15)
@@ -577,3 +582,27 @@ def plot_1pt_pdf_with_skew_kurt(
 
     fig.tight_layout()
     return fig, ax
+
+class MetricsCSVCallback(Callback):
+    """Write one clean row per epoch: epoch, step, train_loss, val_loss, lr."""
+
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self._header_written = False
+
+    def on_validation_epoch_end(self, trainer, _pl_module):
+        m = trainer.callback_metrics
+        epoch = trainer.current_epoch
+        step = trainer.global_step
+
+        train_loss = m['train_loss'].item() if 'train_loss' in m else ''
+        val_loss = m['val_loss'].item() if 'val_loss' in m else ''
+        lr = trainer.optimizers[0].param_groups[0]['lr']
+
+        if not self._header_written:
+            with open(self.filepath, 'w') as f:
+                f.write('epoch,step,train_loss,val_loss,lr\n')
+            self._header_written = True
+
+        with open(self.filepath, 'a') as f:
+            f.write(f'{epoch},{step},{train_loss},{val_loss},{lr}\n')

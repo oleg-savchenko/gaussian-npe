@@ -54,7 +54,6 @@ from gaussian_npe import (
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
 )
-
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
     'WienerNet': Gaussian_NPE_WienerNet,
@@ -250,9 +249,8 @@ def main():
     tb_logger = pl_loggers.TensorBoardLogger(
         save_dir=log_dir, name='tb_logs', version=None,
     )
-    csv_logger = pl_loggers.CSVLogger(
-        save_dir=log_dir, name='csv_logs', version=None,
-    )
+    metrics_csv_path = os.path.join(log_dir, 'metrics.csv')
+    csv_callback = utils.MetricsCSVCallback(metrics_csv_path)
 
     # ── Network ──────────────────────────────────────────────────────────
     NetworkClass = NETWORK_CLASSES[args.network]
@@ -273,9 +271,9 @@ def main():
     trainer = swyft.SwyftTrainer(
         accelerator='cuda' if device == 'cuda' else 'cpu',
         precision=args.precision,
-        logger=[tb_logger, csv_logger],
+        logger=tb_logger,
         max_epochs=args.max_epochs,
-        callbacks=[lr_monitor],
+        callbacks=[lr_monitor, csv_callback],
     )
     dm = swyft.SwyftDataModule(
         store,
@@ -308,7 +306,7 @@ def main():
     os.makedirs(plots_run_dir, exist_ok=True)
 
     utils.plot_training_curves(
-        metrics_file=os.path.join(csv_logger.log_dir, 'metrics.csv'),
+        metrics_file=metrics_csv_path,
         save_path=os.path.join(plots_run_dir, f'training_curves_{run_label}.png'),
         title=f'{run_label} — trained in {h}h {m}m {s}s',
     )
