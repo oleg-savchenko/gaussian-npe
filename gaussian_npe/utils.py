@@ -135,7 +135,7 @@ class Power_Spectrum_Sampler:
         return k_pylians, pk_pylians
 
 
-def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
+def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
                           save_dir='./plots', run_name=''):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
@@ -150,9 +150,9 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
 
     Parameters
     ----------
-    delta_ic : np.ndarray, shape (N, N, N)
+    delta_z127 : np.ndarray, shape (N, N, N)
         True initial conditions field (float32).
-    delta_fin : np.ndarray, shape (N, N, N)
+    delta_z0 : np.ndarray, shape (N, N, N)
         Observed final conditions field (float32).
     samples : np.ndarray, shape (n_samples, N, N, N)
         Posterior samples (float32).
@@ -174,23 +174,23 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
 
     plt.rcParams['figure.facecolor'] = 'white'
 
-    delta_ic = delta_ic.astype('f')
-    delta_fin = delta_fin.astype('f')
+    delta_z127 = delta_z127.astype('f')
+    delta_z0 = delta_z0.astype('f')
     samples = np.asarray(samples).astype('f')
     z_MAP = z_MAP.astype('f')
 
     sample = samples[0]
     std = samples.std(axis=0)
-    residual = sample - delta_ic
+    residual = sample - delta_z127
 
     # ── Figure 1: field slices (3×3) ──────────────────────────────────────
     fig, axes = plt.subplots(3, 3, figsize=(16, 18), sharey=True)
     vmin, vmax = -3, 3
     row_labels = ['True IC', 'Posterior sample', 'Residual']
-    row_data = [delta_ic, sample, residual]
+    row_data = [delta_z127, sample, residual]
     row_vlims = [(vmin, vmax), (vmin, vmax), (vmin / 2, vmax / 2)]
 
-    N = delta_ic.shape[0]
+    N = delta_z127.shape[0]
     slices = [N // 4, N // 4 + N // 8, N // 2]
 
     for row, (data, label, (lo, hi)) in enumerate(zip(row_data, row_labels, row_vlims)):
@@ -215,7 +215,7 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
     slice_idx = N // 2
 
     panels = [
-        (delta_ic[slice_idx], 'True field', 'seismic', vmin, vmax),
+        (delta_z127[slice_idx], 'True field', 'seismic', vmin, vmax),
         (z_MAP[slice_idx], 'MAP estimate', 'seismic', vmin, vmax),
         (std[slice_idx], 'Posterior std', 'Purples', None, None),
     ]
@@ -241,18 +241,18 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
     k_Nq = box_cpu.k_Nq
 
     # True field P(k)
-    k_pylians, pk_ic = box_cpu.get_pk_pylians(delta_ic, MAS=MAS)
+    k_pylians, pk_ic = box_cpu.get_pk_pylians(delta_z127, MAS=MAS)
 
     # MAP P(k) and cross-correlation with truth
     _, pk_MAP = box_cpu.get_pk_pylians(z_MAP, MAS=MAS)
     tk_MAP = np.sqrt(pk_MAP / pk_ic)
 
-    Pk_MAP = PKL.XPk([z_MAP, delta_ic], box_cpu.box_size, axis=0,
+    Pk_MAP = PKL.XPk([z_MAP, delta_z127], box_cpu.box_size, axis=0,
                       MAS=[MAS, MAS], threads=1)
     xpk_MAP = Pk_MAP.XPk[:, 0, 0] / (Pk_MAP.Pk[:, 0, 0] * Pk_MAP.Pk[:, 0, 1])**0.5
 
     # Cross-correlation between IC and final field (linear baseline)
-    Pk_lin = PKL.XPk([delta_ic, delta_fin], box_cpu.box_size, axis=0,
+    Pk_lin = PKL.XPk([delta_z127, delta_z0], box_cpu.box_size, axis=0,
                       MAS=[MAS, MAS], threads=1)
     xpk_linear = Pk_lin.XPk[:, 0, 0] / (Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])**0.5
 
@@ -261,7 +261,7 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
     for i in range(len(samples)):
         s_i = samples[i]
         _, pk_i = box_cpu.get_pk_pylians(s_i, MAS=MAS)
-        Pk_i = PKL.XPk([s_i, delta_ic], box_cpu.box_size, axis=0,
+        Pk_i = PKL.XPk([s_i, delta_z127], box_cpu.box_size, axis=0,
                         MAS=[MAS, MAS], threads=1)
         pks.append(pk_i)
         tks.append(np.sqrt(pk_i / pk_ic))
@@ -347,7 +347,7 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
     fig.savefig(os.path.join(out_dir, f'summary_stats_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 4: 1-point PDF with skewness & kurtosis ───────────────────
-    fig, ax = plot_1pt_pdf_with_skew_kurt(delta_ic, samples)
+    fig, ax = plot_1pt_pdf_with_skew_kurt(delta_z127, samples)
     fig.savefig(os.path.join(out_dir, f'1pt_pdf_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 5: reduced bispectrum Q(theta) ────────────────────────────
@@ -363,7 +363,7 @@ def plot_samples_analysis(delta_ic, delta_fin, samples, z_MAP, box,
 
     for ax, cfg in zip(axes, bispec_configs):
         # True field bispectrum
-        BBk_true = PKL.Bk(delta_ic, box_cpu.box_size,
+        BBk_true = PKL.Bk(delta_z127, box_cpu.box_size,
                           cfg['k1'], cfg['k2'], theta, MAS, threads=1)
         Qk_true = BBk_true.Q
 
@@ -474,7 +474,6 @@ def plot_1pt_pdf_with_skew_kurt(
     if title is not None:
         ax.set_title(title)
 
-    # Annotation like in the paper figure
     txt = (
         rf'$\gamma_1 = {g1_mean:.1e} \pm {g1_std:.1e}$' + "\n" +
         rf'$\gamma_2 = {g2_mean:.1e} \pm {g2_std:.1e}$'
@@ -486,8 +485,3 @@ def plot_1pt_pdf_with_skew_kurt(
 
     fig.tight_layout()
     return fig, ax
-
-
-# --- Example usage ---
-# fig, ax = plot_1pt_pdf_with_skew_kurt(delta, samples, nbins=140, smooth_sigma=1.8, xlim=(-6, 6))
-# plt.show()

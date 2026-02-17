@@ -6,11 +6,12 @@ from gaussian_npe.Q_matrices import Precision_Matrix_From_Factors, Precision_Mat
 from gaussian_npe.utils import hartley
 
 class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut, w_cut):
+    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut, w_cut,
+                 learning_rate=1e-2, early_stopping_patience=5, lr_scheduler_patience=1):
         super().__init__()
-        self.learning_rate = 1e-2
-        self.early_stopping_patience = 5
-        self.lr_scheduler_patience = 1
+        self.learning_rate = learning_rate
+        self.early_stopping_patience = early_stopping_patience
+        self.lr_scheduler_patience = lr_scheduler_patience
 
         self.box = box
         self.N = box.N
@@ -212,7 +213,7 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
         )
 
     def _compute_rescaling(self, sim_params):
-        """Compute D(z_ic) per sample from sim_params.
+        """Compute D(z_ic)/D(0) per sample from sim_params.
 
         Args:
             sim_params: (B, 5) tensor [Omega_m, Omega_b, h, n_s, sigma_8]
@@ -220,7 +221,10 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
             (B,) tensor of rescaling factors
         """
         Omega_m = sim_params[:, 0]
-        return self._growth_D_tensor(Omega_m, self.Z_IC)
+        return (
+            self._growth_D_tensor(Omega_m, self.Z_IC)
+            / self._growth_D_tensor(Omega_m, 0.0)
+        )
 
     def set_rescaling(self, sim_params):
         """Set rescaling_factor for inference from a single sim_params vector.
@@ -233,7 +237,9 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
             'Omega_cdm': float(sim_params[0]) - float(sim_params[1]),
             'Omega_b': float(sim_params[1]),
         }
-        self.rescaling_factor = growth_D_approx(cosmo, self.Z_IC)
+        self.rescaling_factor = (
+            growth_D_approx(cosmo, self.Z_IC) / growth_D_approx(cosmo, 0)
+        )
 
     def forward(self, A, B):
         x = A['delta_z0']

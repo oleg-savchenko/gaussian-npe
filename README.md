@@ -48,8 +48,9 @@ gaussian_npe/               Python package
     networks.py             Neural network classes (Gaussian_NPE_Network)
     utils.py                Power spectra (CLASS, Pylians), growth factor,
                             Hartley transform, plotting & diagnostics
-train.py                    Training script with argparse, timestamped runs, checkpointing
-infer.py                    Inference script: load a trained model, generate samples, plot
+scripts/
+    train.py                Training script with argparse, timestamped runs, checkpointing
+    infer.py                Inference script: load a trained model, generate samples, plot
 ```
 
 ## Training data
@@ -81,10 +82,10 @@ A separate target observation is provided as a `.pt` file with keys `delta_z0` a
 ### Training
 
 ```bash
-python train.py --run_name baseline --max_epochs 30 --sigma_noise 0.1
+python scripts/train.py --run_name baseline --max_epochs 30 --sigma_noise 0.1
 ```
 
-All hyperparameters can be set via command-line flags (see `python train.py --help`):
+All hyperparameters can be set via command-line flags (see `python scripts/train.py --help`):
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -115,7 +116,7 @@ Training takes approximately 1.5 hours on a single 40GB NVIDIA A100 GPU.
 Load a trained model and generate posterior samples for a (potentially new) observation:
 
 ```bash
-python infer.py --model_dir ./runs/20260216_153000_baseline
+python scripts/infer.py --model_dir ./runs/20260216_153000_baseline
 ```
 
 | Flag | Default | Description |

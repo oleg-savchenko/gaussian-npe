@@ -6,29 +6,42 @@ simulations, saves the model checkpoint, and produces diagnostic plots
 (field slices + summary statistics).
 
 Usage:
-    python train.py --run_name my_experiment --max_epochs 30 --sigma_noise 0.1
+    python scripts/train.py --run_name my_experiment --max_epochs 30 --sigma_noise 0.1
 
-    python train.py \
+    python scripts/train.py \
         --run_name baseline \
-        --store_path ./os240713-Swyft_Quijote_128_1Gpc \
-        --target_path ./Quijote_target/Quijote_sample0.pt \
+        --output_dir ./runs \
+        --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_fiducial_res128_deconv_MAK \
         --max_epochs 30 \
-        --sigma_noise 0.1 \
+        --rescaling_factor 0.009908314998484411 \
         --k_cut 0.03 \
         --w_cut 0.001 \
-        --num_samples 100
+        --sigma_noise 0.1 \
+        --learning_rate 0.01 \
+        --early_stopping_patience 5 \
+        --lr_scheduler_patience 1 \
+        --batch_size 8 \
+        --val_fraction 0.2 \
+        --num_workers 2 \
+        --precision 32 \
+        --target_path ./Quijote_target/Quijote_sample0.pt \
+        --num_samples 100 \
+        --MAS PCS
 """
 
 import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import argparse
 import json
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import swyft
 from datetime import datetime
 
-from gaussian_npe import utils
-from gaussian_npe.networks import Gaussian_NPE_Network
+from gaussian_npe import utils, Gaussian_NPE_Network
 
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -73,7 +86,7 @@ def parse_args():
     # ── Data ─────────────────────────────────────────────────────────────
     parser.add_argument(
         '--store_path', type=str,
-        default='./os240713-Swyft_Quijote_128_1Gpc',
+        default='/gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_fiducial_res128_deconv_MAK',
         help='Path to swyft ZarrStore with Quijote simulations',
     )
 
@@ -100,6 +113,18 @@ def parse_args():
         help='Gaussian noise std added to the observed field during training',
     )
     parser.add_argument(
+        '--learning_rate', type=float, default=1e-2,
+        help='Initial learning rate for AdamW optimizer',
+    )
+    parser.add_argument(
+        '--early_stopping_patience', type=int, default=5,
+        help='Early stopping patience (epochs without val_loss improvement)',
+    )
+    parser.add_argument(
+        '--lr_scheduler_patience', type=int, default=1,
+        help='ReduceLROnPlateau patience (epochs before reducing LR)',
+    )
+    parser.add_argument(
         '--batch_size', type=int, default=8,
         help='Training batch size',
     )
@@ -119,7 +144,7 @@ def parse_args():
     # ── Sampling & plotting ──────────────────────────────────────────────
     parser.add_argument(
         '--target_path', type=str,
-        default='./Quijote_target/Quijote_sample0.pt',
+        default='/home/osavchenko/Quijote/Quijote_target/Quijote_sample0_wout_MAK.pt',
         help='Path to the target observation .pt file '
              '(must contain delta_z0 and delta_z127 keys)',
     )
@@ -155,9 +180,12 @@ def main():
     box = utils.Power_Spectrum_Sampler(BOX_PARAMS, device=device)
     print(f'k_Nq = {box.k_Nq:.4f} h/Mpc, k_F = {box.k_F:.6f} h/Mpc')
 
-    Dz_approx = utils.growth_D_approx(COSMO_PARAMS, Z_IC)
+    Dz_approx = (
+        utils.growth_D_approx(COSMO_PARAMS, Z_IC)
+        / utils.growth_D_approx(COSMO_PARAMS, 0)
+    )
     rescaling_factor = args.rescaling_factor if args.rescaling_factor is not None else Dz_approx
-    print(f'Rescaling factor D(z={Z_IC}): {rescaling_factor:.6f}')
+    print(f'Rescaling factor D(z={Z_IC})/D(z=0): {rescaling_factor:.6f}')
 
     prior = box.get_prior_Q_factors(
         lambda k: torch.tensor(
@@ -202,6 +230,9 @@ def main():
         rescaling_factor=rescaling_factor,
         k_cut=args.k_cut,
         w_cut=args.w_cut,
+        learning_rate=args.learning_rate,
+        early_stopping_patience=args.early_stopping_patience,
+        lr_scheduler_patience=args.lr_scheduler_patience,
     )
     network.float().to(device)
 
@@ -233,15 +264,14 @@ def main():
     # ── Generate samples & plot ──────────────────────────────────────────
     print(f'\nGenerating {args.num_samples} posterior samples '
           f'from target {args.target_path}...')
-    network.eval()
+    network.to(device).eval()
 
     sample0 = torch.load(args.target_path, weights_only=False)
-    delta_z0 = sample0['delta_z0'].to(device).float()
-    delta_ic = sample0['delta_z127'].cpu().numpy().astype('f')   # true ICs (z=127)
-    delta_fin = sample0['delta_z0'].cpu().numpy().astype('f')    # observation (z=0)
+    delta_z0 = sample0['delta_z0'].astype('f')
+    delta_z127 = sample0['delta_z127'].astype('f')
 
     with torch.no_grad():
-        z_MAP = network.get_z_MAP(delta_z0)
+        z_MAP = network.get_z_MAP(torch.from_numpy(delta_z0).to(device).float())
         samples = network.sample(args.num_samples, z_MAP=z_MAP)
 
     z_MAP_np = z_MAP.cpu().numpy()
@@ -249,10 +279,10 @@ def main():
     print('Plotting analysis...')
     plots_dir = os.path.join(output_dir, 'plots')
     utils.plot_samples_analysis(
-        delta_ic=delta_ic,
-        delta_fin=delta_fin,
-        samples=samples,
-        z_MAP=z_MAP_np,
+        delta_z127=delta_z127 / rescaling_factor,
+        delta_z0=delta_z0,
+        samples=np.array(samples) / rescaling_factor,
+        z_MAP=z_MAP_np / rescaling_factor,
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,

@@ -5,16 +5,21 @@ Loads a trained Gaussian NPE model, generates posterior samples for a
 given target observation, and produces diagnostic plots.
 
 Usage:
-    python infer.py --model_dir ./runs/20260216_153000_baseline
+    python scripts/infer.py --model_dir ./runs/20260216_153000_baseline
 
-    python infer.py \
+    python scripts/infer.py \
         --model_dir ./runs/20260216_153000_baseline \
+        --run_name rerun_more_samples \
+        --output_dir ./runs/infer_outputs \
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 200 \
-        --run_name rerun_more_samples
+        --MAS PCS
 """
 
 import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 import argparse
 import json
 import numpy as np
@@ -22,8 +27,7 @@ import torch
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from gaussian_npe import utils
-from gaussian_npe.networks import Gaussian_NPE_Network
+from gaussian_npe import utils, Gaussian_NPE_Network
 
 
 # ── Quijote fiducial cosmology (Planck 2018) ────────────────────────────
@@ -131,7 +135,10 @@ def main():
     box = utils.Power_Spectrum_Sampler(BOX_PARAMS, device=device)
     print(f'k_Nq = {box.k_Nq:.4f} h/Mpc, k_F = {box.k_F:.6f} h/Mpc')
 
-    Dz_approx = utils.growth_D_approx(COSMO_PARAMS, Z_IC)
+    Dz_approx = (
+        utils.growth_D_approx(COSMO_PARAMS, Z_IC)
+        / utils.growth_D_approx(COSMO_PARAMS, 0)
+    )
     rescaling_factor = train_config.get('rescaling_factor', Dz_approx)
     print(f'Rescaling factor: {rescaling_factor:.6f}')
 
@@ -175,14 +182,13 @@ def main():
     # ── Load target observation ──────────────────────────────────────────
     print(f'Loading target from {target_path}...')
     sample0 = torch.load(target_path, weights_only=False)
-    delta_z0 = sample0['delta_z0'].to(device).float()
-    delta_ic = sample0['delta_z127'].cpu().numpy().astype('f')   # true ICs (z=127)
-    delta_fin = sample0['delta_z0'].cpu().numpy().astype('f')    # observation (z=0)
+    delta_z0 = sample0['delta_z0'].astype('f')
+    delta_z127 = sample0['delta_z127'].astype('f')
 
     # ── Generate MAP & posterior samples ──────────────────────────────────
     print(f'Generating {args.num_samples} posterior samples...')
     with torch.no_grad():
-        z_MAP = network.get_z_MAP(delta_z0)
+        z_MAP = network.get_z_MAP(torch.from_numpy(delta_z0).to(device).float())
         samples = network.sample(args.num_samples, z_MAP=z_MAP)
 
     z_MAP_np = z_MAP.cpu().numpy()
@@ -191,10 +197,10 @@ def main():
     print('Plotting analysis...')
     plots_dir = os.path.join(output_dir, 'plots')
     utils.plot_samples_analysis(
-        delta_ic=delta_ic,
-        delta_fin=delta_fin,
-        samples=samples,
-        z_MAP=z_MAP_np,
+        delta_z127=delta_z127 / rescaling_factor,
+        delta_z0=delta_z0,
+        samples=np.array(samples) / rescaling_factor,
+        z_MAP=z_MAP_np / rescaling_factor,
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,
