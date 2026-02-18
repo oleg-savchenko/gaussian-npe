@@ -2,7 +2,8 @@
 Gaussian NPE Inference Script for Cosmological IC Reconstruction
 
 Loads a trained Gaussian NPE model, generates posterior samples for a
-given target observation, and produces diagnostic plots.
+given target observation, and produces diagnostic plots.  Optionally
+runs an amortization test over many held-out observations.
 
 Usage:
     python scripts/infer.py --model_dir ./runs/20260216_153000_baseline
@@ -14,6 +15,12 @@ Usage:
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 200 \
         --MAS PCS \
+        --noise_seed 42
+
+Amortization test (run on many held-out observations):
+    python scripts/infer.py \
+        --model_dir ./runs/20260216_153000_baseline \
+        --target_dir ./Quijote_target \
         --noise_seed 42
 """
 
@@ -28,7 +35,25 @@ import torch
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-from gaussian_npe import utils, Gaussian_NPE_Network
+from gaussian_npe import (
+    utils,
+    Gaussian_NPE_Network,
+    Gaussian_NPE_UNet_Only,
+    Gaussian_NPE_WienerNet,
+    Gaussian_NPE_LearnableFilter,
+    Gaussian_NPE_SmoothFilter,
+    Gaussian_NPE_Iterative,
+    Gaussian_NPE_LH,
+)
+NETWORK_CLASSES = {
+    'default': Gaussian_NPE_Network,
+    'UNet_Only': Gaussian_NPE_UNet_Only,
+    'WienerNet': Gaussian_NPE_WienerNet,
+    'LearnableFilter': Gaussian_NPE_LearnableFilter,
+    'SmoothFilter': Gaussian_NPE_SmoothFilter,
+    'Iterative': Gaussian_NPE_Iterative,
+    'LH': Gaussian_NPE_LH,
+}
 
 
 # ── Quijote fiducial cosmology (Planck 2018) ────────────────────────────
@@ -94,6 +119,14 @@ def parse_args():
         help='Random seed for the observational noise added to the target field',
     )
 
+    # ── Amortization test ────────────────────────────────────────────────
+    parser.add_argument(
+        '--target_dir', type=str, default=None,
+        help='Directory of held-out .pt files for the amortization test. '
+             'Each file must contain delta_z0 and delta_z127 keys. '
+             'If provided, runs the amortization diagnostic after standard inference.',
+    )
+
     return parser.parse_args()
 
 
@@ -154,13 +187,18 @@ def main():
     )
 
     # ── Reconstruct network & load weights ───────────────────────────────
-    network = Gaussian_NPE_Network(
-        box, prior,
+    network_name = train_config.get('network', 'default')
+    NetworkClass = NETWORK_CLASSES[network_name]
+    print(f'Network: {NetworkClass.__name__}')
+    net_kwargs = dict(
         sigma_noise=train_config.get('sigma_noise', 0.0),
         rescaling_factor=rescaling_factor,
-        k_cut=train_config.get('k_cut', 0.03),
-        w_cut=train_config.get('w_cut', 0.001),
     )
+    # Only pass k_cut/w_cut to networks that accept them
+    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative'):
+        net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
+        net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
+    network = NetworkClass(box, prior, **net_kwargs)
     network.float().to(device)
 
     model_path = os.path.join(args.model_dir, 'model.pt')
@@ -168,6 +206,14 @@ def main():
     network.load_state_dict(state_dict)
     network.eval()
     print(f'Model loaded from {model_path}')
+
+    # ── Load target observation ──────────────────────────────────────────
+    print(f'Loading target from {target_path}...')
+    sample0 = torch.load(target_path, weights_only=False)
+    delta_z0 = sample0['delta_z0'].astype('f')
+    delta_z127 = sample0['delta_z127'].astype('f')
+
+    sigma_noise = train_config.get('sigma_noise', 0.0)
 
     # ── Save inference config ────────────────────────────────────────────
     infer_config = {
@@ -185,14 +231,6 @@ def main():
     }
     with open(os.path.join(output_dir, 'infer_config.json'), 'w') as f:
         json.dump(infer_config, f, indent=2)
-
-    # ── Load target observation ──────────────────────────────────────────
-    print(f'Loading target from {target_path}...')
-    sample0 = torch.load(target_path, weights_only=False)
-    delta_z0 = sample0['delta_z0'].astype('f')
-    delta_z127 = sample0['delta_z127'].astype('f')
-
-    sigma_noise = train_config.get('sigma_noise', 0.0)
     rng = np.random.default_rng(args.noise_seed)
     delta_obs = delta_z0 + rng.standard_normal(delta_z0.shape).astype('f') * sigma_noise
     print(f'Added observational noise (sigma={sigma_noise}, seed={args.noise_seed})')
@@ -223,6 +261,57 @@ def main():
     )
     print(f'Plots saved to {os.path.join(plots_dir, run_label)}')
     plt.close('all')
+
+    print('Running calibration diagnostics...')
+    utils.plot_calibration_diagnostics(
+        delta_z127=delta_z127 / rescaling_factor,
+        z_MAP=z_MAP_np / rescaling_factor,
+        samples=np.array(samples) / rescaling_factor,
+        box=box,
+        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+        save_dir=plots_dir,
+        run_name=run_label,
+    )
+    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, run_label)}')
+    plt.close('all')
+
+    # ── Amortization test (optional) ────────────────────────────────────
+    if args.target_dir is not None:
+        pt_files = sorted([
+            os.path.join(args.target_dir, f)
+            for f in os.listdir(args.target_dir) if f.endswith('.pt')
+        ])
+        print(f'\nRunning amortization test on {len(pt_files)} observations '
+              f'from {args.target_dir}...')
+
+        rng_amort = np.random.default_rng(args.noise_seed)
+        z_MAPs, z_trues = [], []
+        with torch.no_grad():
+            for i, pt_file in enumerate(pt_files):
+                sample_i = torch.load(pt_file, weights_only=False)
+                dz0_i = sample_i['delta_z0'].astype('f')
+                dz127_i = sample_i['delta_z127'].astype('f')
+                obs_i = dz0_i + rng_amort.standard_normal(dz0_i.shape).astype('f') * sigma_noise
+                z_MAP_i = network.get_z_MAP(
+                    torch.from_numpy(obs_i).to(device).float()
+                )
+                z_MAPs.append(z_MAP_i.cpu().numpy() / rescaling_factor)
+                z_trues.append(dz127_i / rescaling_factor)
+                if (i + 1) % 10 == 0 or i + 1 == len(pt_files):
+                    print(f'  [{i + 1}/{len(pt_files)}]')
+
+        utils.plot_amortization_test(
+            z_MAPs=np.array(z_MAPs),
+            z_trues=np.array(z_trues),
+            box=box,
+            Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+            Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+            save_dir=plots_dir,
+            run_name=run_label,
+        )
+        print(f'Amortization test saved to {os.path.join(plots_dir, run_label, "amortization")}')
+        plt.close('all')
 
     print(f'\nInference complete. All outputs saved to {output_dir}')
 

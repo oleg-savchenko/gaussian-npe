@@ -5,8 +5,16 @@ from map2map.models import UNet
 from gaussian_npe.matrices import Precision_Matrix_From_Factors, Precision_Matrix_FFT, Precision_Matrix_Sum
 from gaussian_npe.utils import hartley
 
-class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut, w_cut,
+
+class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
+    """Abstract base class for all Gaussian NPE architectures.
+
+    Provides the shared Gaussian posterior machinery (Q matrices, log_prob,
+    loss, sampling) and training loop (forward).  Subclasses must implement
+    ``estimator(x)`` which returns the MAP estimate in internal space.
+    """
+
+    def __init__(self, box, prior, sigma_noise, rescaling_factor=1.0,
                  learning_rate=1e-2, early_stopping_patience=5, lr_scheduler_patience=1):
         super().__init__()
         self.learning_rate = learning_rate
@@ -17,9 +25,6 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         self.N = box.N
         self.sigma_noise = sigma_noise
         self.rescaling_factor = rescaling_factor
-        self.k_cut = k_cut
-        self.w_cut = w_cut
-        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
         self.unet = UNet(1, 1, hid_chan=16, bypass=False)
 
         self.prior = prior
@@ -28,13 +33,7 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
 
     def estimator(self, x):
-        p3d = 6*(20,)
-        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
-        xx = self.unet(xx.unsqueeze(1)).squeeze(1)
-
-        x = x + self.box.sigmoid_filter(xx, self.k_cut, self.w_cut)
-        x = self.prior[0](self.prior[2](x) * self.scale)
-        return x
+        raise NotImplementedError
 
     def forward(self, A, B):
         x = A['delta_z0']
@@ -103,21 +102,67 @@ class Gaussian_NPE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         """Returns the MAP estimation for a given x_obs."""
         return self.estimator(x_obs.unsqueeze(0)).squeeze(0).detach() * self.rescaling_factor
 
-    def sample(self, num_samples, x_obs = None, z_MAP = None, to_numpy=True):
-        """Samples the posterior for a given x_obs (or z_MAP), Q_prior and Q_like."""
+    def sample(self, num_samples, x_obs=None, z_MAP=None, to_numpy=True):
+        """Samples the posterior for a given x_obs or z_MAP (provide exactly one)."""
+        if (x_obs is None) == (z_MAP is None):
+            raise ValueError("Provide exactly one of x_obs or z_MAP")
         if z_MAP is None:
             z_MAP = self.get_z_MAP(x_obs)
-        D_prior = self.Q_prior.D.detach().cuda() * self.rescaling_factor**-2
-        D_like = self.Q_like.D.detach().cuda() * self.rescaling_factor**-2
+        D_post = (self.Q_prior.D + self.Q_like.D).detach() * self.rescaling_factor**-2
+        std = D_post**-0.5
 
-        if to_numpy:
-            draws = [(self.prior[0]((D_prior + D_like)**-0.5 * torch.randn_like(D_prior)) + z_MAP).cpu().numpy() for _ in range(num_samples)]
-        else:
-            draws = [(self.prior[0]((D_prior + D_like)**-0.5 * torch.randn_like(D_prior)) + z_MAP).cpu() for _ in range(num_samples)]
+        draws = []
+        for _ in range(num_samples):
+            z = self.Q_post.G_T(std * torch.randn_like(D_post)) + z_MAP
+            draws.append(z.cpu().numpy() if to_numpy else z.cpu())
         return draws
 
 
-class Gaussian_NPE_WienerNet(Gaussian_NPE_Network):
+class Gaussian_NPE_Network(Gaussian_NPE_Base):
+    """Default architecture: sigmoid high-pass filter + per-mode scale.
+
+        mu(x) = G_T(scale · G(x + sigmoid_filter(UNet(x))))
+
+    The sigmoid filter suppresses UNet corrections below k_cut, and the
+    learnable per-mode scale factors adjust amplitudes in Hartley space.
+    """
+
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        self.k_cut = k_cut
+        self.w_cut = w_cut
+        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
+
+    def estimator(self, x):
+        p3d = 6*(20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        xx = self.unet(xx.unsqueeze(1)).squeeze(1)
+
+        x = x + self.box.sigmoid_filter(xx, self.k_cut, self.w_cut)
+        x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
+        return x
+
+
+class Gaussian_NPE_UNet_Only(Gaussian_NPE_Base):
+    """Residual U-Net MAP estimator without any Fourier-space filtering.
+
+    The MAP estimate is the input plus a learned U-Net correction:
+
+        mu(x) = x + UNet(x)
+
+    Since bypass=False in the UNet (no internal skip connection), the
+    residual path is added explicitly here.  No sigmoid high-pass filter
+    and no per-mode scale factors.  Serves as a minimal baseline to
+    isolate the U-Net's contribution.
+    """
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        return x + self.unet(xx.unsqueeze(1)).squeeze(1)
+
+
+class Gaussian_NPE_WienerNet(Gaussian_NPE_Base):
     """Wiener filter baseline + U-Net residual correction.
 
     Replaces the sigmoid high-pass filter and per-mode scale with a
@@ -131,17 +176,13 @@ class Gaussian_NPE_WienerNet(Gaussian_NPE_Network):
     dominates, without an arbitrary k_cut.
     """
 
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001, **kwargs):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
-        # scale parameter is inherited but unused; Wiener weights come from D_like/D_prior
-
     def estimator(self, x):
         # Wiener filter in Hartley space
-        x_h = self.prior[2](x)                         # (B, N^3)
-        D_prior = self.Q_prior.D                        # (N^3,)
-        D_like = self.Q_like.D                          # (N^3,)
-        w = D_like / (D_prior + D_like)                 # (N^3,)
-        x_wiener = self.prior[0](x_h * w)              # (B, N, N, N)
+        x_h = self.Q_post.G(x)                          # (B, N^3)
+        D_prior = self.Q_prior.D                         # (N^3,)
+        D_like = self.Q_like.D                           # (N^3,)
+        w = D_like / (D_prior + D_like)                  # (N^3,)
+        x_wiener = self.Q_post.G_T(x_h * w)             # (B, N, N, N)
 
         # U-Net learns nonlinear residual correction
         p3d = 6 * (20,)
@@ -151,7 +192,7 @@ class Gaussian_NPE_WienerNet(Gaussian_NPE_Network):
         return x_wiener + correction
 
 
-class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Network):
+class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
     """Learnable per-mode filter replacing the fixed sigmoid.
 
     Same architecture as the original but replaces the hard sigmoidal
@@ -166,8 +207,9 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Network):
     sigmoid baseline.
     """
 
-    def __init__(self, box, prior, sigma_noise, rescaling_factor, k_cut=0.03, w_cut=0.001, **kwargs):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
 
         # Initialize filter_logit so that sigmoid(filter_logit) == sigmoid((k - k_cut) / w_cut)
         # i.e. filter_logit = (k - k_cut) / w_cut
@@ -188,11 +230,71 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Network):
         )
 
         x = x + xx_filtered
-        x = self.prior[0](self.prior[2](x) * self.scale)
+        x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
         return x
 
 
-class Gaussian_NPE_Iterative(Gaussian_NPE_Network):
+class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
+    """Learnable smooth filter as a function of |k|.
+
+    Like LearnableFilter but parameterizes the filter as a smooth function
+    of |k| using learnable logit values at logarithmically-spaced k-nodes
+    with linear interpolation.  This enforces the physical isotropy of the
+    problem (~20 DOF) while being more flexible than the 2-parameter sigmoid.
+
+        w(k) = sigmoid(interp(log|k|; logit_nodes))
+
+    Initialized from the same sigmoid baseline as the default network.
+    """
+
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, n_filter_nodes=20, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
+
+        # Log-spaced nodes from k_F to k_Nq
+        log_k_nodes = torch.linspace(
+            float(torch.tensor(float(box.k_F)).log()),
+            float(torch.tensor(float(box.k_Nq)).log()),
+            n_filter_nodes,
+        )
+
+        # Initialize node logits from the sigmoid baseline
+        self.filter_logit_nodes = torch.nn.Parameter(
+            (log_k_nodes.exp() - k_cut) / w_cut
+        )
+
+        # Precompute fixed (N³, n_nodes) interpolation weight matrix
+        log_k = torch.log(box.k.flatten().clamp(min=float(box.k_F)))
+        idx = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_filter_nodes - 1)
+        frac = ((log_k - log_k_nodes[idx - 1])
+                / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
+
+        # Each mode gets weight (1-frac) on node[idx-1] and frac on node[idx]
+        W = torch.zeros(self.N**3, n_filter_nodes)
+        arange = torch.arange(self.N**3)
+        W[arange, idx - 1] = 1 - frac
+        W[arange, idx] = frac
+        self.register_buffer('_interp_W', W)
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        xx = self.unet(xx.unsqueeze(1)).squeeze(1)
+
+        # Smooth learnable filter (interpolated from ~20 k-nodes)
+        w = torch.sigmoid(self._interp_W @ self.filter_logit_nodes)     # (N³,)
+        xx_h = hartley(xx, dim=self.box.hartley_dim).flatten(-3, -1)   # (B, N³)
+        xx_filtered = hartley(
+            (w * xx_h).unflatten(-1, self.box.shape),
+            dim=self.box.hartley_dim,
+        )
+
+        x = x + xx_filtered
+        x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
+        return x
+
+
+class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
     """Iterative refinement with a 2-channel U-Net.
 
     Instead of a single U-Net pass, iteratively refines the MAP estimate
@@ -208,9 +310,9 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Network):
     current state and the data at each step.
     """
 
-    def __init__(self, box, prior, sigma_noise, rescaling_factor,
-                 k_cut=0.03, w_cut=0.001, num_iterations=3, **kwargs):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
+    def __init__(self, *args, num_iterations=3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
         self.num_iterations = num_iterations
         # Override U-Net: 2 input channels (current estimate + observation)
         self.unet = UNet(2, 1, hid_chan=16, bypass=False)
@@ -224,7 +326,7 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Network):
             correction = self.unet(inp_padded).squeeze(1)              # (B, N, N, N)
             mu = mu + correction
 
-        mu = self.prior[0](self.prior[2](mu) * self.scale)
+        mu = self.Q_post.G_T(self.Q_post.G(mu) * self.scale)
         return mu
 
 
@@ -246,10 +348,6 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
     """
 
     Z_IC = 127
-
-    def __init__(self, box, prior, sigma_noise, rescaling_factor=1.0,
-                 k_cut=0.03, w_cut=0.001, **kwargs):
-        super().__init__(box, prior, sigma_noise, rescaling_factor, k_cut, w_cut, **kwargs)
 
     @staticmethod
     def _growth_D_tensor(Omega_m, z):

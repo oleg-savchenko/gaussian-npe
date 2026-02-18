@@ -45,11 +45,14 @@ class Precision_Matrix_From_Factors(GDG_Factor_Matrix):
 
     Input and output shapes are (B, N, N, N), where shape = (N, N, N).
     """
-    def __init__(self, G_T, D, G):
+    def __init__(self, G_T, D, G, learnable=False):
         super().__init__()
         self._G = G
         self._G_T = G_T
-        self._D = torch.nn.Parameter(D, requires_grad = False)
+        if learnable:
+            self._D = torch.nn.Parameter(D)
+        else:
+            self.register_buffer('_D', D)
 
     def G(self, x):
         return self._G(x)

@@ -49,15 +49,19 @@ from datetime import datetime
 from gaussian_npe import (
     utils,
     Gaussian_NPE_Network,
+    Gaussian_NPE_UNet_Only,
     Gaussian_NPE_WienerNet,
     Gaussian_NPE_LearnableFilter,
+    Gaussian_NPE_SmoothFilter,
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
 )
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
+    'UNet_Only': Gaussian_NPE_UNet_Only,
     'WienerNet': Gaussian_NPE_WienerNet,
     'LearnableFilter': Gaussian_NPE_LearnableFilter,
+    'SmoothFilter': Gaussian_NPE_SmoothFilter,
     'Iterative': Gaussian_NPE_Iterative,
     'LH': Gaussian_NPE_LH,
 }
@@ -235,6 +239,7 @@ def main():
     }
     with open(os.path.join(output_dir, 'config.json'), 'w') as f:
         json.dump(config, f, indent=2)
+    print(f'\nConfig:\n{json.dumps(config, indent=2)}')
 
     # ── Data ─────────────────────────────────────────────────────────────
     store = swyft.ZarrStore(args.store_path)
@@ -255,16 +260,18 @@ def main():
     # ── Network ──────────────────────────────────────────────────────────
     NetworkClass = NETWORK_CLASSES[args.network]
     print(f'Network: {NetworkClass.__name__}')
-    network = NetworkClass(
-        box, prior,
+    net_kwargs = dict(
         sigma_noise=args.sigma_noise,
         rescaling_factor=rescaling_factor,
-        k_cut=args.k_cut,
-        w_cut=args.w_cut,
         learning_rate=args.learning_rate,
         early_stopping_patience=args.early_stopping_patience,
         lr_scheduler_patience=args.lr_scheduler_patience,
     )
+    # Only pass k_cut/w_cut to networks that accept them
+    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative'):
+        net_kwargs['k_cut'] = args.k_cut
+        net_kwargs['w_cut'] = args.w_cut
+    network = NetworkClass(box, prior, **net_kwargs)
     network.float().to(device)
 
     # ── Trainer ──────────────────────────────────────────────────────────

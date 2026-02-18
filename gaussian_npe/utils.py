@@ -5,7 +5,7 @@ import Pk_library as PKL
 from classy import Class
 import matplotlib.pyplot as plt
 import os
-from scipy.stats import skew, kurtosis
+from scipy.stats import skew, kurtosis, norm, kstest
 from scipy.ndimage import gaussian_filter1d  # just for smoothing the histogram curves
 from pytorch_lightning.callbacks import Callback
 
@@ -494,7 +494,7 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
         ax.set_ylabel(r'$D(k)$', fontsize=14)
         ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
-        ax.legend(loc='best', markerscale=8)
+        ax.legend(loc='upper right', markerscale=8)
         ax.grid(alpha=0.15)
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f'Q_diagonals_{run_name}.png'), bbox_inches='tight')
@@ -533,7 +533,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, run_name) if run_name else save_dir
+    out_dir = os.path.join(save_dir, run_name, 'calibration') if run_name else os.path.join(save_dir, 'calibration')
     os.makedirs(out_dir, exist_ok=True)
     plt.rcParams['figure.facecolor'] = 'white'
 
@@ -690,7 +690,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     sc = ax.scatter(sel_true, sel_pred, c=np.log10(sel_k), cmap='viridis',
                     s=4, alpha=0.6, zorder=5)
     ax.errorbar(sel_true, sel_pred, yerr=2 * sel_sigma,
-                fmt='none', ecolor='grey', elinewidth=0.3, alpha=0.3, zorder=1)
+                fmt='none', ecolor='grey', elinewidth=0.5, alpha=0.5, zorder=1)
 
     lim = max(np.abs(sel_true).max(), np.abs(sel_pred).max()) * 1.1
     ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.8, alpha=0.5)
@@ -822,6 +822,208 @@ def plot_1pt_pdf_with_skew_kurt(
 
     fig.tight_layout()
     return fig, ax
+
+def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
+                           save_dir='./plots', run_name=''):
+    """Amortization test: calibration diagnostics across many held-out observations.
+
+    For each test pair (z_MAP_i, z_true_i), computes the chi-squared statistic
+
+        chi2_i = sum_{k!=0} D_post[k] * (H(z_true_i - z_MAP_i))[k]^2
+
+    Under a well-calibrated Gaussian posterior, chi2_i ~ chi2(N^3-1).
+    With many observations this provides a powerful statistical test.
+
+    Produces three figures and a summary text file:
+      1. Per-mode chi2 vs |k| averaged over observations (should be ~1.0 everywhere).
+      2. Chi2 z-score histogram (should be standard normal).
+      3. PP-plot: empirical CDF of probability integral transform values
+         (should follow the diagonal).
+      4. amortization_summary.txt: scalar metrics.
+
+    All inputs must be in internal space (i.e. divided by rescaling_factor).
+
+    Parameters
+    ----------
+    z_MAPs : np.ndarray, shape (N_obs, N, N, N)
+        MAP estimates for each observation.
+    z_trues : np.ndarray, shape (N_obs, N, N, N)
+        True initial conditions for each observation.
+    box : Power_Spectrum_Sampler
+        Box object (for k-grid, k_F, k_Nq).
+    Q_like_D : np.ndarray, shape (N^3,)
+        Diagonal of the likelihood precision matrix.
+    Q_prior_D : np.ndarray, shape (N^3,)
+        Diagonal of the prior precision matrix.
+    save_dir : str
+        Directory to save the output plots.
+    run_name : str
+        Suffix appended to filenames.
+    """
+    out_dir = os.path.join(save_dir, run_name, 'amortization') if run_name else os.path.join(save_dir, 'amortization')
+    os.makedirs(out_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    z_MAPs = np.asarray(z_MAPs, dtype='f')
+    z_trues = np.asarray(z_trues, dtype='f')
+    N_obs = len(z_MAPs)
+
+    k_flat = box.k.cpu().numpy().flatten()
+    k_Nq = box.k_Nq
+    k_F = box.k_F
+
+    # ── Precomputation ────────────────────────────────────────────────────
+    D_post = (Q_like_D + Q_prior_D).astype(np.float64)
+    n_modes = D_post.size - 1           # N^3 - 1 (excluding k=0)
+    D_k = D_post[1:]                    # (n_modes,)
+    k_modes = k_flat[1:]               # (n_modes,)
+
+    # Accumulate per-mode chi2 mean and total chi2 per observation.
+    # Running sums avoid storing the full (N_obs, n_modes) array.
+    chi2_mode_sum = np.zeros(n_modes, dtype=np.float64)
+    chi2_total = np.zeros(N_obs, dtype=np.float64)
+
+    for i in range(N_obs):
+        r_h = hartley_np(z_trues[i] - z_MAPs[i]).ravel().astype(np.float64)
+        chi2_k = D_k * r_h[1:]**2
+        chi2_mode_sum += chi2_k
+        chi2_total[i] = chi2_k.sum()
+
+    chi2_mode_mean = chi2_mode_sum / N_obs
+
+    # Z-scores: (chi2 - dof) / sqrt(2*dof) ~ N(0,1) for large dof
+    z_scores = (chi2_total - n_modes) / np.sqrt(2.0 * n_modes)
+
+    # PIT values via normal approximation (exact for dof >> 1)
+    pit_values = norm.cdf(z_scores)
+
+    # KS test for uniformity of PIT values
+    ks_stat, ks_pvalue = kstest(pit_values, 'uniform')
+
+    # ── Figure 1: per-mode chi2 vs |k| (averaged over observations) ──────
+    k_bin_edges = np.logspace(np.log10(k_F), np.log10(k_Nq), 31)
+    k_bin_centers = np.sqrt(k_bin_edges[:-1] * k_bin_edges[1:])
+
+    chi2_binned = np.full(len(k_bin_centers), np.nan)
+    expected_sem = np.full(len(k_bin_centers), np.nan)
+    for i in range(len(k_bin_centers)):
+        in_bin = (k_modes >= k_bin_edges[i]) & (k_modes < k_bin_edges[i + 1])
+        n_bin = in_bin.sum()
+        if n_bin > 0:
+            chi2_binned[i] = chi2_mode_mean[in_bin].mean()
+            # Under H0, each mode contributes chi2(1) with var=2.
+            # Binned mean over n_bin modes and N_obs observations:
+            expected_sem[i] = np.sqrt(2.0 / (N_obs * n_bin))
+
+    valid = ~np.isnan(chi2_binned)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.plot(k_bin_centers[valid], chi2_binned[valid],
+            'o-', markersize=4, lw=1.5, color='steelblue',
+            label=r'$\langle D_k\, r_k^2 \rangle_{\mathrm{obs},\,k}$')
+    ax.fill_between(k_bin_centers[valid],
+                     1 - 2 * expected_sem[valid], 1 + 2 * expected_sem[valid],
+                     alpha=0.15, color='grey', label=r'Expected $\pm 2\sigma$')
+    ax.fill_between(k_bin_centers[valid],
+                     1 - expected_sem[valid], 1 + expected_sem[valid],
+                     alpha=0.3, color='grey', label=r'Expected $\pm 1\sigma$')
+    ax.axhline(1.0, color='k', ls='--', lw=0.8)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm Nyq}$')
+
+    global_reduced_chi2 = chi2_total.mean() / n_modes
+    txt = (
+        f'$N_{{\\rm obs}} = {N_obs}$\n'
+        f'Global reduced $\\chi^2 = {global_reduced_chi2:.4f}$\n\n'
+        r'Well-calibrated $\Rightarrow$ binned mean $\approx 1$'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xscale('log')
+    ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
+    ax.set_ylabel(r'$\langle D_{\rm post}(k)\, r_h(k)^2 \rangle$', fontsize=14)
+    ax.set_title(r'Per-mode $\chi^2$ (averaged over observations)')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'chi2_per_k_amortized_{run_name}.png'), bbox_inches='tight')
+
+    # ── Figure 2: chi2 z-score histogram ──────────────────────────────────
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.hist(z_scores, bins=max(15, N_obs // 5), density=True, alpha=0.7,
+            color='steelblue', edgecolor='white', label='Observations')
+
+    zz = np.linspace(z_scores.min() - 0.5, z_scores.max() + 0.5, 200)
+    ax.plot(zz, norm.pdf(zz), 'k-', lw=1.5, label=r'$\mathcal{N}(0, 1)$')
+
+    z_mean = z_scores.mean()
+    z_std = z_scores.std(ddof=1)
+    txt = (
+        f'$N_{{\\rm obs}} = {N_obs}$\n'
+        f'Mean $= {z_mean:.3f}$  (expect 0)\n'
+        f'Std $= {z_std:.3f}$  (expect 1)\n\n'
+        r'$z = (\chi^2 - \nu) \,/\, \sqrt{2\nu}$'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xlabel(r'$\chi^2$ z-score', fontsize=14)
+    ax.set_ylabel('Density', fontsize=14)
+    ax.set_title(r'Total $\chi^2$ distribution across observations')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'chi2_zscore_hist_{run_name}.png'), bbox_inches='tight')
+
+    # ── Figure 3: PP-plot (expected coverage) ─────────────────────────────
+    pit_sorted = np.sort(pit_values)
+    empirical_cdf = np.arange(1, N_obs + 1) / N_obs
+
+    # Confidence band: Kolmogorov-Smirnov 95% band for N_obs samples
+    ks_band = 1.36 / np.sqrt(N_obs)  # 95% KS critical value
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot(pit_sorted, empirical_cdf, 'o-', markersize=3, lw=1.5,
+            color='steelblue', label='Observed')
+    ax.plot([0, 1], [0, 1], 'k--', lw=0.8, label='Ideal')
+    ax.fill_between([0, 1],
+                     [0 - ks_band, 1 - ks_band],
+                     [0 + ks_band, 1 + ks_band],
+                     alpha=0.15, color='grey', label=f'95% KS band')
+
+    txt = (
+        f'$N_{{\\rm obs}} = {N_obs}$\n'
+        f'KS statistic $= {ks_stat:.4f}$\n'
+        f'KS $p$-value $= {ks_pvalue:.4f}$\n\n'
+        r'Well-calibrated $\Rightarrow$ follows diagonal'
+    )
+    ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
+            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+
+    ax.set_xlabel('Nominal coverage (PIT quantile)', fontsize=14)
+    ax.set_ylabel('Empirical coverage', fontsize=14)
+    ax.set_title('PP-plot (expected coverage)')
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_aspect('equal')
+    ax.legend(loc='lower right', fontsize=9)
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, f'pp_plot_{run_name}.png'), bbox_inches='tight')
+
+    # ── Summary text file ─────────────────────────────────────────────────
+    summary_path = os.path.join(out_dir, f'amortization_summary_{run_name}.txt')
+    with open(summary_path, 'w') as f_sum:
+        f_sum.write(f'Amortization test summary: {run_name}\n')
+        f_sum.write(f'{"=" * 50}\n\n')
+        f_sum.write(f'N_obs:                      {N_obs}\n')
+        f_sum.write(f'N_modes (N^3 - 1):          {n_modes}\n')
+        f_sum.write(f'Global reduced chi2:        {global_reduced_chi2:.6f}\n')
+        f_sum.write(f'chi2 z-score mean:          {z_mean:.6f}  (expect 0)\n')
+        f_sum.write(f'chi2 z-score std:           {z_std:.6f}  (expect 1)\n')
+        f_sum.write(f'KS statistic:               {ks_stat:.6f}\n')
+        f_sum.write(f'KS p-value:                 {ks_pvalue:.6f}\n')
+
 
 class MetricsCSVCallback(Callback):
     """Write one clean row per epoch: epoch, step, train_loss, val_loss, lr."""
