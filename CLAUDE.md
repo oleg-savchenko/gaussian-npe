@@ -13,6 +13,7 @@ Training data: Quijote N-body simulations (128³ grid, 1 Gpc/h box). Fields: `de
 - `gaussian_npe/utils.py` — Hartley transform, power spectra (CLASS, Pylians), growth factor, all plotting/diagnostics
 - `scripts/train.py` — Training script with argparse, NETWORK_CLASSES dict
 - `scripts/infer.py` — Inference + amortization test, also has NETWORK_CLASSES dict
+- `paper_test_runs/sweep_noise.py` — SLURM sweep over sigma_noise values (calls train.py)
 
 When adding a new network class, it must be registered in three places: `networks.py` (define), `__init__.py` (export), and both `train.py`/`infer.py` (NETWORK_CLASSES dict + import).
 
@@ -76,7 +77,8 @@ Uses `map2map.models.UNet` with `bypass=False` (no internal skip connection). Th
 
 - `self.prior` is a tuple `(G_T, D, G)` — the prior Q-factor triple. Prefer `self.Q_post.G`, `self.Q_post.G_T` over `self.prior[2]`, `self.prior[0]`.
 - `sample()` takes exactly one of `x_obs` or `z_MAP` (mutual exclusion enforced).
-- Plotting functions save to `plots/{run_name}/` with calibration in a `calibration/` subfolder.
+- Plotting functions save PNGs to `plots/{run_name}/` with calibration in a `calibration/` subfolder and amortization in an `amortization/` subfolder.
+- `plot_samples_analysis`, `plot_calibration_diagnostics`, and `plot_amortization_test` accept `save_csv=False`. When True, they save CSV + human-readable txt files to a `diagnostics/` subfolder within their respective output directories. `train.py` and `infer.py` pass `save_csv=True`.
 - Config is saved as JSON at start of training and printed to stdout.
 
 ## Running
