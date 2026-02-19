@@ -258,6 +258,7 @@ def main():
         Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
         save_dir=plots_dir,
         run_name=run_label,
+        save_csv=True,
     )
     print(f'Plots saved to {os.path.join(plots_dir, run_label)}')
     plt.close('all')
@@ -272,6 +273,7 @@ def main():
         Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
         save_dir=plots_dir,
         run_name=run_label,
+        save_csv=True,
     )
     print(f'Calibration diagnostics saved to {os.path.join(plots_dir, run_label)}')
     plt.close('all')
@@ -309,6 +311,7 @@ def main():
             Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
             save_dir=plots_dir,
             run_name=run_label,
+            save_csv=True,
         )
         print(f'Amortization test saved to {os.path.join(plots_dir, run_label, "amortization")}')
         plt.close('all')

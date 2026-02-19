@@ -211,7 +211,8 @@ def plot_training_curves(metrics_file, save_path, title=''):
 def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
                           Q_like_D=None, Q_prior_D=None,
-                          save_dir='./plots', run_name=''):
+                          save_dir='./plots', run_name='',
+                          save_csv=False):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
 
     Produces up to six figures:
@@ -499,10 +500,61 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f'Q_diagonals_{run_name}.png'), bbox_inches='tight')
 
+    # ── Optional: save diagnostic data files ─────────────────────────────────
+    if save_csv:
+        diag_dir = os.path.join(out_dir, 'diagnostics')
+        os.makedirs(diag_dir, exist_ok=True)
+
+        # Spectra CSV (k-dependent quantities)
+        spectra_keys = [
+            'k', 'pk_true', 'pk_MAP', 'pk_samples_mean', 'pk_samples_std',
+            'tk_MAP', 'tk_samples_mean', 'tk_samples_std',
+            'ck_MAP', 'ck_linear', 'ck_samples_mean', 'ck_samples_std',
+        ]
+        spectra_data = np.column_stack([
+            k_pylians, pk_ic, pk_MAP, pks.mean(0), pks.std(0),
+            tk_MAP, tks.mean(0), tks.std(0),
+            xpk_MAP, xpk_linear, xpks.mean(0), xpks.std(0),
+        ])
+        np.savetxt(os.path.join(diag_dir, f'spectra_{run_name}.csv'),
+                   spectra_data, delimiter=',',
+                   header=','.join(spectra_keys), comments='')
+
+        # Scalars CSV (1-point statistics)
+        B = samples.shape[0]
+        x_samp = samples.reshape(B, -1).astype(np.float64)
+        g1 = skew(x_samp, axis=1, bias=False, nan_policy='omit')
+        g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
+
+        scalar_keys = [
+            'skewness_true', 'skewness_samples_mean', 'skewness_samples_std',
+            'kurtosis_true', 'kurtosis_samples_mean', 'kurtosis_samples_std',
+        ]
+        scalar_vals = [
+            float(skew(delta_z127.ravel(), bias=False)),
+            float(np.mean(g1)), float(np.std(g1, ddof=1)),
+            float(kurtosis(delta_z127.ravel(), fisher=True, bias=False)),
+            float(np.mean(g2)), float(np.std(g2, ddof=1)),
+        ]
+        with open(os.path.join(diag_dir, f'scalars_samples_{run_name}.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(scalar_keys)
+            writer.writerow(scalar_vals)
+
+        # Human-readable txt
+        with open(os.path.join(diag_dir, f'samples_summary_{run_name}.txt'), 'w') as f:
+            f.write(f'Samples summary: {run_name}\n')
+            f.write(f'{"=" * 50}\n\n')
+            f.write(f'Skewness (truth):           {scalar_vals[0]:.6f}\n')
+            f.write(f'Skewness (samples mean):    {scalar_vals[1]:.6f} +/- {scalar_vals[2]:.6f}\n')
+            f.write(f'Kurtosis (truth):           {scalar_vals[3]:.6f}\n')
+            f.write(f'Kurtosis (samples mean):    {scalar_vals[4]:.6f} +/- {scalar_vals[5]:.6f}\n')
+
 
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
                                   Q_like_D, Q_prior_D,
-                                  save_dir='./plots', run_name=''):
+                                  save_dir='./plots', run_name='',
+                                  save_csv=False):
     """Posterior calibration diagnostics in Hartley space.
 
     Produces three figures and a summary text file:
@@ -717,20 +769,42 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f'hartley_modes_{run_name}.png'), bbox_inches='tight')
 
-    # ── Calibration summary text file ─────────────────────────────────────
-    summary_path = os.path.join(out_dir, f'calibration_summary_{run_name}.txt')
-    with open(summary_path, 'w') as f_sum:
-        f_sum.write(f'Calibration summary: {run_name}\n')
-        f_sum.write(f'{"=" * 50}\n\n')
-        f_sum.write(f'N_modes (N^3 - 1):          {n_modes}\n')
-        f_sum.write(f'Reduced chi2 (truth):       {reduced_chi2:.6f}\n')
-        f_sum.write(f'log p(z_true | x):          {log_p_true:.2f}\n')
-        f_sum.write(f'Expected mean log p:        {expected_log_p:.2f}\n')
-        f_sum.write(f'Expected std log p:         {expected_std:.2f}\n')
-        f_sum.write(f'Sample mean log p:          {sample_mean:.2f}\n')
-        f_sum.write(f'Sample std log p:           {sample_std:.2f}\n')
-        f_sum.write(f'z-score(z_true):            {z_score_true:.4f}\n')
-        f_sum.write(f'2-sigma coverage (modes):   {coverage_2sigma:.4f} ({coverage_2sigma:.1%})\n')
+    # ── Optional: save calibration summary ────────────────────────────────────
+    if save_csv:
+        diag_dir = os.path.join(out_dir, 'diagnostics')
+        os.makedirs(diag_dir, exist_ok=True)
+
+        # CSV
+        scalar_keys = [
+            'n_modes', 'reduced_chi2', 'log_p_true',
+            'expected_mean_log_p', 'expected_std_log_p',
+            'sample_mean_log_p', 'sample_std_log_p',
+            'z_score_true', 'coverage_2sigma',
+        ]
+        scalar_vals = [
+            n_modes, float(reduced_chi2), float(log_p_true),
+            float(expected_log_p), float(expected_std),
+            float(sample_mean), float(sample_std),
+            float(z_score_true), float(coverage_2sigma),
+        ]
+        with open(os.path.join(diag_dir, f'scalars_calibration_{run_name}.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(scalar_keys)
+            writer.writerow(scalar_vals)
+
+        # Human-readable txt
+        with open(os.path.join(diag_dir, f'calibration_summary_{run_name}.txt'), 'w') as f:
+            f.write(f'Calibration summary: {run_name}\n')
+            f.write(f'{"=" * 50}\n\n')
+            f.write(f'N_modes (N^3 - 1):          {n_modes}\n')
+            f.write(f'Reduced chi2 (truth):       {reduced_chi2:.6f}\n')
+            f.write(f'log p(z_true | x):          {log_p_true:.2f}\n')
+            f.write(f'Expected mean log p:        {expected_log_p:.2f}\n')
+            f.write(f'Expected std log p:         {expected_std:.2f}\n')
+            f.write(f'Sample mean log p:          {sample_mean:.2f}\n')
+            f.write(f'Sample std log p:           {sample_std:.2f}\n')
+            f.write(f'z-score(z_true):            {z_score_true:.4f}\n')
+            f.write(f'2-sigma coverage (modes):   {coverage_2sigma:.4f} ({coverage_2sigma:.1%})\n')
 
 
 def plot_1pt_pdf_with_skew_kurt(
@@ -824,7 +898,8 @@ def plot_1pt_pdf_with_skew_kurt(
     return fig, ax
 
 def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
-                           save_dir='./plots', run_name=''):
+                           save_dir='./plots', run_name='',
+                           save_csv=False):
     """Amortization test: calibration diagnostics across many held-out observations.
 
     For each test pair (z_MAP_i, z_true_i), computes the chi-squared statistic
@@ -1011,18 +1086,38 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, f'pp_plot_{run_name}.png'), bbox_inches='tight')
 
-    # ── Summary text file ─────────────────────────────────────────────────
-    summary_path = os.path.join(out_dir, f'amortization_summary_{run_name}.txt')
-    with open(summary_path, 'w') as f_sum:
-        f_sum.write(f'Amortization test summary: {run_name}\n')
-        f_sum.write(f'{"=" * 50}\n\n')
-        f_sum.write(f'N_obs:                      {N_obs}\n')
-        f_sum.write(f'N_modes (N^3 - 1):          {n_modes}\n')
-        f_sum.write(f'Global reduced chi2:        {global_reduced_chi2:.6f}\n')
-        f_sum.write(f'chi2 z-score mean:          {z_mean:.6f}  (expect 0)\n')
-        f_sum.write(f'chi2 z-score std:           {z_std:.6f}  (expect 1)\n')
-        f_sum.write(f'KS statistic:               {ks_stat:.6f}\n')
-        f_sum.write(f'KS p-value:                 {ks_pvalue:.6f}\n')
+    # ── Optional: save diagnostic data files ─────────────────────────────────
+    if save_csv:
+        diag_dir = os.path.join(out_dir, 'diagnostics')
+        os.makedirs(diag_dir, exist_ok=True)
+
+        # CSV
+        scalar_keys = [
+            'n_obs', 'n_modes', 'global_reduced_chi2',
+            'z_score_mean', 'z_score_std',
+            'ks_stat', 'ks_pvalue',
+        ]
+        scalar_vals = [
+            N_obs, n_modes, float(global_reduced_chi2),
+            float(z_mean), float(z_std),
+            float(ks_stat), float(ks_pvalue),
+        ]
+        with open(os.path.join(diag_dir, f'scalars_amortization_{run_name}.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(scalar_keys)
+            writer.writerow(scalar_vals)
+
+        # Human-readable txt
+        with open(os.path.join(diag_dir, f'amortization_summary_{run_name}.txt'), 'w') as f:
+            f.write(f'Amortization test summary: {run_name}\n')
+            f.write(f'{"=" * 50}\n\n')
+            f.write(f'N_obs:                      {N_obs}\n')
+            f.write(f'N_modes (N^3 - 1):          {n_modes}\n')
+            f.write(f'Global reduced chi2:        {global_reduced_chi2:.6f}\n')
+            f.write(f'chi2 z-score mean:          {z_mean:.6f}  (expect 0)\n')
+            f.write(f'chi2 z-score std:           {z_std:.6f}  (expect 1)\n')
+            f.write(f'KS statistic:               {ks_stat:.6f}\n')
+            f.write(f'KS p-value:                 {ks_pvalue:.6f}\n')
 
 
 class MetricsCSVCallback(Callback):
