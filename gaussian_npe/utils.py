@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import csv
 import torch
@@ -186,7 +187,7 @@ class Power_Spectrum_Sampler:
         return k_pylians, pk_pylians
 
 
-def plot_training_curves(metrics_file, save_path, title=''):
+def plot_training_curves(metrics_file, save_path, title='', config=None):
     """Plot training/validation loss and learning rate from a metrics CSV.
 
     Parameters
@@ -197,6 +198,8 @@ def plot_training_curves(metrics_file, save_path, title=''):
         Full path (including filename) where the figure will be saved.
     title : str
         Figure suptitle.
+    config : dict, optional
+        Run configuration dict displayed as a text panel on the right.
     """
     if not os.path.exists(metrics_file):
         print(f'Metrics file not found: {metrics_file}')
@@ -214,7 +217,14 @@ def plot_training_curves(metrics_file, save_path, title=''):
     train_loss = np.array([float(r['train_loss']) for r in rows])
     val_loss = np.array([float(r['val_loss']) for r in rows])
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    ncols = 3 if config is not None else 2
+    width_ratios = [2, 2, 0.9] if config is not None else [1, 1]
+    fig, axes = plt.subplots(
+        1, ncols, figsize=(13 if config is not None else 10, 4),
+        gridspec_kw={'width_ratios': width_ratios},
+        constrained_layout=True,
+    )
+    ax1, ax2 = axes[0], axes[1]
 
     # Loss curves
     ax1.plot(epochs, train_loss, label='Train loss')
@@ -239,9 +249,37 @@ def plot_training_curves(metrics_file, save_path, title=''):
         ax2.grid(alpha=0.15)
         ax2.set_title('Learning rate schedule')
 
+    # Config panel
+    if config is not None:
+        ax3 = axes[2]
+        ax3.set_axis_off()
+        lines = []
+        for k, v in config.items():
+            if isinstance(v, float):
+                v_str = f'{v:.6g}'
+            elif isinstance(v, str) and len(v) > 35:
+                v_str = '\u2026' + v[-32:]
+            else:
+                v_str = str(v)
+            lines.append(f'{k}: {v_str}')
+        # Pad to equal width so ha='center' (used to align the title above)
+        # still renders as left-aligned text inside the box (monospace font).
+        max_len = max(len(l) for l in lines)
+        lines_padded = [l.ljust(max_len) for l in lines]
+        ax3.text(
+            0.5, 1.0, '\n'.join(lines_padded),
+            transform=ax3.transAxes,
+            fontsize=6.5,
+            verticalalignment='top',
+            horizontalalignment='center',
+            fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                      edgecolor='#aaaaaa', alpha=0.9),
+        )
+        ax3.set_title('Config', fontsize=9)
+
     if title:
         fig.suptitle(title, fontsize=11)
-    fig.tight_layout()
     fig.savefig(save_path, bbox_inches='tight')
     plt.close(fig)
 
@@ -288,7 +326,7 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, run_name) if run_name else save_dir
+    out_dir = save_dir
     os.makedirs(out_dir, exist_ok=True)
 
     plt.rcParams['figure.facecolor'] = 'white'
@@ -551,18 +589,27 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
 
         # Scalars CSV (1-point statistics)
         B = samples.shape[0]
+        x_true_flat = delta_z127.ravel().astype(np.float64)
         x_samp = samples.reshape(B, -1).astype(np.float64)
+        mu_samp = x_samp.mean(axis=1)           # (B,) per-sample spatial mean
+        sig_samp = x_samp.std(axis=1, ddof=1)   # (B,) per-sample spatial std
         g1 = skew(x_samp, axis=1, bias=False, nan_policy='omit')
         g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
 
         scalar_keys = [
+            'mean_true', 'mean_samples_mean', 'mean_samples_std',
+            'std_true', 'std_samples_mean', 'std_samples_std',
             'skewness_true', 'skewness_samples_mean', 'skewness_samples_std',
             'kurtosis_true', 'kurtosis_samples_mean', 'kurtosis_samples_std',
         ]
         scalar_vals = [
-            float(skew(delta_z127.ravel().astype(np.float64), bias=False)),
+            float(x_true_flat.mean()),
+            float(np.mean(mu_samp)), float(np.std(mu_samp, ddof=1)),
+            float(x_true_flat.std(ddof=1)),
+            float(np.mean(sig_samp)), float(np.std(sig_samp, ddof=1)),
+            float(skew(x_true_flat, bias=False)),
             float(np.mean(g1)), float(np.std(g1, ddof=1)),
-            float(kurtosis(delta_z127.ravel().astype(np.float64), fisher=True, bias=False)),
+            float(kurtosis(x_true_flat, fisher=True, bias=False)),
             float(np.mean(g2)), float(np.std(g2, ddof=1)),
         ]
         with open(os.path.join(diag_dir, f'scalars_samples_{run_name}.csv'), 'w', newline='') as f:
@@ -570,14 +617,18 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
             writer.writerow(scalar_keys)
             writer.writerow(scalar_vals)
 
-        # Human-readable txt
+        # Human-readable txt  (uncertainties shown as ±2σ over samples)
         with open(os.path.join(diag_dir, f'samples_summary_{run_name}.txt'), 'w') as f:
             f.write(f'Samples summary: {run_name}\n')
             f.write(f'{"=" * 50}\n\n')
-            f.write(f'Skewness (truth):           {scalar_vals[0]:.6f}\n')
-            f.write(f'Skewness (samples mean):    {scalar_vals[1]:.6f} +/- {scalar_vals[2]:.6f}\n')
-            f.write(f'Kurtosis (truth):           {scalar_vals[3]:.6f}\n')
-            f.write(f'Kurtosis (samples mean):    {scalar_vals[4]:.6f} +/- {scalar_vals[5]:.6f}\n')
+            f.write(f'Mean (truth):               {scalar_vals[0]:.6f}\n')
+            f.write(f'Mean (samples mean):        {scalar_vals[1]:.6f} +/- {2*scalar_vals[2]:.6f}\n')
+            f.write(f'Std  (truth):               {scalar_vals[3]:.6f}\n')
+            f.write(f'Std  (samples mean):        {scalar_vals[4]:.6f} +/- {2*scalar_vals[5]:.6f}\n')
+            f.write(f'Skewness (truth):           {scalar_vals[6]:.6f}\n')
+            f.write(f'Skewness (samples mean):    {scalar_vals[7]:.6f} +/- {2*scalar_vals[8]:.6f}\n')
+            f.write(f'Kurtosis (truth):           {scalar_vals[9]:.6f}\n')
+            f.write(f'Kurtosis (samples mean):    {scalar_vals[10]:.6f} +/- {2*scalar_vals[11]:.6f}\n')
 
 
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
@@ -614,7 +665,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, run_name, 'calibration') if run_name else os.path.join(save_dir, 'calibration')
+    out_dir = os.path.join(save_dir, 'calibration')
     os.makedirs(out_dir, exist_ok=True)
     plt.rcParams['figure.facecolor'] = 'white'
 
@@ -848,10 +899,11 @@ def plot_1pt_pdf_with_skew_kurt(
     Reproduce a "paper-style" 1-point PDF comparison plot:
       - solid line: mean PDF across reconstructed samples
       - dashed line: PDF of the true field
-      - text: mean ± std over samples of skewness (γ1) and excess kurtosis (γ2)
+      - text: mean ± 2σ over samples of μ, σ, skewness (γ1), and excess kurtosis (γ2)
 
     Notes:
-      - Skewness/kurtosis are computed per sample (each sample is flattened to N^3 values).
+      - All statistics are computed per sample (each sample is flattened to N^3 values).
+      - Uncertainties in the annotation are ±2σ across the B posterior samples.
       - The displayed PDF for samples is the mean of per-sample histograms (shared bins).
     """
     delta = np.asarray(delta)
@@ -894,7 +946,18 @@ def plot_1pt_pdf_with_skew_kurt(
         h_true_plot = h_true
         h_mean_plot = h_mean
 
-    # Skewness and excess kurtosis per sample (over voxels), then mean ± std over samples
+    # Mean and std per sample (over voxels), then mean ± 2*std over samples
+    x_true_fin = x_true[np.isfinite(x_true)]
+    mu = x_samp.mean(axis=1)   # (B,)
+    sig = x_samp.std(axis=1, ddof=1)  # (B,)
+    mu_true = float(x_true_fin.mean())
+    sig_true = float(x_true_fin.std(ddof=1))
+    g1_true = float(skew(x_true_fin, bias=False))
+    g2_true = float(kurtosis(x_true_fin, fisher=True, bias=False))
+    mu_mean, mu_std = float(np.mean(mu)), float(np.std(mu, ddof=1))
+    sig_mean, sig_std = float(np.mean(sig)), float(np.std(sig, ddof=1))
+
+    # Skewness and excess kurtosis per sample (over voxels), then mean ± 2*std over samples
     g1 = skew(x_samp, axis=1, bias=False, nan_policy="omit")  # (B,)
     g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy="omit")  # (B,) excess kurtosis
 
@@ -914,13 +977,25 @@ def plot_1pt_pdf_with_skew_kurt(
     if title is not None:
         ax.set_title(title)
 
-    txt = (
-        rf'$\gamma_1 = {g1_mean:.1e} \pm {g1_std:.1e}$' + "\n" +
-        rf'$\gamma_2 = {g2_mean:.1e} \pm {g2_std:.1e}$'
+    # Samples annotation (top left)
+    txt_samples = (
+        rf'$\mu = {mu_mean:.1e} \pm {2*mu_std:.1e}$' + "\n" +
+        rf'$\sigma = {sig_mean:.3f} \pm {2*sig_std:.1e}$' + "\n" +
+        rf'$\gamma_1 = {g1_mean:.1e} \pm {2*g1_std:.1e}$' + "\n" +
+        rf'$\gamma_2 = {g2_mean:.1e} \pm {2*g2_std:.1e}$'
     )
-    ax.text(0.06, 0.92, txt, transform=ax.transAxes, va='top', ha='left')
+    ax.text(0.04, 0.97, txt_samples, transform=ax.transAxes, va='top', ha='left', fontsize=8)
 
-    ax.legend(loc='upper right', frameon=True)
+    # Truth annotation (top right)
+    txt_truth = (
+        rf'$\mu = {mu_true:.1e}$' + "\n" +
+        rf'$\sigma = {sig_true:.3f}$' + "\n" +
+        rf'$\gamma_1 = {g1_true:.1e}$' + "\n" +
+        rf'$\gamma_2 = {g2_true:.1e}$'
+    )
+    ax.text(0.96, 0.97, txt_truth, transform=ax.transAxes, va='top', ha='right', fontsize=8)
+
+    ax.legend(loc='lower center', frameon=True)
     ax.grid(False)
 
     fig.tight_layout()
@@ -964,7 +1039,7 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, run_name, 'amortization') if run_name else os.path.join(save_dir, 'amortization')
+    out_dir = os.path.join(save_dir, 'amortization')
     os.makedirs(out_dir, exist_ok=True)
     plt.rcParams['figure.facecolor'] = 'white'
 
@@ -1155,6 +1230,10 @@ class MetricsCSVCallback(Callback):
     def __init__(self, filepath):
         self.filepath = filepath
         self._header_written = False
+        self._t_start = None
+
+    def on_train_start(self, trainer, _pl_module):
+        self._t_start = time.time()
 
     def on_validation_epoch_end(self, trainer, _pl_module):
         m = trainer.callback_metrics
@@ -1175,4 +1254,6 @@ class MetricsCSVCallback(Callback):
 
         train_str = f'{train_loss:.4f}' if train_loss != '' else 'n/a'
         val_str   = f'{val_loss:.4f}'   if val_loss   != '' else 'n/a'
-        print(f'Epoch {epoch:3d} | step {step:6d} | train_loss {train_str} | val_loss {val_str} | lr {lr:.2e}')
+        elapsed = time.time() - self._t_start if self._t_start is not None else 0.0
+        h, m_e, s = int(elapsed // 3600), int(elapsed % 3600 // 60), int(elapsed % 60)
+        print(f'Epoch {epoch:3d} | step {step:6d} | {h}h {m_e}m {s}s | train_loss {train_str} | val_loss {val_str} | lr {lr:.2e}')

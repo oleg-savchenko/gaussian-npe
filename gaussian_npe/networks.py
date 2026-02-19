@@ -98,8 +98,15 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         return swyft.AuxLoss(loss, 'z')
 
     def get_z_MAP(self, x_obs):
-        """Returns the MAP estimation for a given x_obs."""
-        return self.estimator(x_obs.unsqueeze(0)).squeeze(0).detach() * self.rescaling_factor
+        """Returns the MAP estimation for a given x_obs.
+
+        The spatial mean is subtracted to enforce the zero-mean overdensity
+        constraint (δ̄ = 0 on a periodic box). The k=0 mode is excluded from
+        the training loss, so the network never learns to zero it — this
+        correction applies it analytically at inference time.
+        """
+        z = self.estimator(x_obs.unsqueeze(0)).squeeze(0).detach() * self.rescaling_factor
+        return z - z.mean()
 
     def sample(self, num_samples, x_obs=None, z_MAP=None, to_numpy=True):
         """Samples the posterior for a given x_obs or z_MAP (provide exactly one)."""
@@ -139,7 +146,7 @@ class Gaussian_NPE_Network(Gaussian_NPE_Base):
 
         x = x + self.box.sigmoid_filter(xx, self.k_cut, self.w_cut)
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x
+        return x - x.mean()  # enforce zero-mean overdensity
 
 
 class Gaussian_NPE_UNet_Only(Gaussian_NPE_Base):
@@ -158,7 +165,8 @@ class Gaussian_NPE_UNet_Only(Gaussian_NPE_Base):
     def estimator(self, x):
         p3d = 6 * (20,)
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
-        return x + self.unet(xx.unsqueeze(1)).squeeze(1)
+        x = x + self.unet(xx.unsqueeze(1)).squeeze(1)
+        return x - x.mean()
 
 
 class Gaussian_NPE_WienerNet(Gaussian_NPE_Base):
@@ -264,13 +272,14 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
 
         # Precompute fixed (N³, n_nodes) interpolation weight matrix
         log_k = torch.log(box.k.flatten().clamp(min=float(box.k_F)))
+        log_k_nodes = log_k_nodes.to(log_k.device)
         idx = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_filter_nodes - 1)
         frac = ((log_k - log_k_nodes[idx - 1])
                 / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
 
         # Each mode gets weight (1-frac) on node[idx-1] and frac on node[idx]
-        W = torch.zeros(self.N**3, n_filter_nodes)
-        arange = torch.arange(self.N**3)
+        W = torch.zeros(self.N**3, n_filter_nodes, device=log_k.device)
+        arange = torch.arange(self.N**3, device=log_k.device)
         W[arange, idx - 1] = 1 - frac
         W[arange, idx] = frac
         self.register_buffer('_interp_W', W)
@@ -314,7 +323,7 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
         self.scale = torch.nn.Parameter(torch.ones(self.N**3))
         self.num_iterations = num_iterations
         # Override U-Net: 2 input channels (current estimate + observation)
-        self.unet = UNet(2, 1, hid_chan=16, bypass=False)
+        self.unet = UNet(2, 1, hid_chan=8, bypass=False)
 
     def estimator(self, x):
         mu = x
@@ -399,3 +408,53 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
         z = z / rescaling[:, None, None, None]
 
         return self.loss(b, z)
+
+class MAP_MSE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
+    """MAP estimator trained with mean-squared error loss.
+
+    A point-estimate-only network that predicts the IC field via a residual
+    U-Net without modelling the full posterior.  The loss is per-voxel MSE
+    in internal (rescaled) space:
+
+        mu(x) = x + UNet(x)
+        loss  = MSE(mu(x), z_rescaled)
+
+    No Q matrices or prior are used.  Serves as a baseline to compare
+    against the Gaussian posterior networks.
+    """
+
+    def __init__(self, box, sigma_noise, rescaling_factor=1.0,
+                 learning_rate=1e-2, early_stopping_patience=5, lr_scheduler_patience=1):
+        super().__init__()
+        self.learning_rate = learning_rate
+        self.early_stopping_patience = early_stopping_patience
+        self.lr_scheduler_patience = lr_scheduler_patience
+
+        self.box = box
+        self.N = box.N
+        self.sigma_noise = sigma_noise
+        self.rescaling_factor = rescaling_factor
+        self.unet = UNet(1, 1, hid_chan=16, bypass=False)
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        return x + self.unet(xx.unsqueeze(1)).squeeze(1)
+
+    def forward(self, A, B):
+        x = A['delta_z0']
+        x += torch.randn_like(x) * self.sigma_noise
+        b = self.estimator(x)
+
+        z = B['delta_z127'][:len(x)]
+        z = self.rescaling_factor**-1 * z
+        return self.loss(b, z)
+
+    def loss(self, z_MAP, z):
+        """Per-voxel MSE in internal (rescaled) space."""
+        loss = ((z_MAP - z)**2).mean(dim=(-3, -2, -1))
+        return swyft.AuxLoss(loss, 'z')
+
+    def get_z_MAP(self, x_obs):
+        """Returns the MAP estimate for a given observation."""
+        return self.estimator(x_obs.unsqueeze(0)).squeeze(0).detach() * self.rescaling_factor

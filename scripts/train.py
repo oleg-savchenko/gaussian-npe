@@ -226,7 +226,10 @@ def main():
         utils.growth_D_approx(COSMO_PARAMS, Z_IC)
         / utils.growth_D_approx(COSMO_PARAMS, 0)
     )
-    rescaling_factor = args.rescaling_factor if args.rescaling_factor is not None else Dz_approx
+    # Resolve rescaling_factor back into args so vars(args) is self-consistent
+    if args.rescaling_factor is None:
+        args.rescaling_factor = Dz_approx
+    rescaling_factor = args.rescaling_factor
     print(f'Rescaling factor D(z={Z_IC})/D(z=0): {rescaling_factor:.6f}')
 
     prior = box.get_prior_Q_factors(
@@ -236,12 +239,15 @@ def main():
     )
 
     # ── Save config ──────────────────────────────────────────────────────
+    # k_cut and w_cut are omitted for networks that don't use them.
+    _filter_keys = set()
+    if args.network in ('UNet_Only', 'WienerNet', 'Iterative'):
+        _filter_keys = {'k_cut', 'w_cut'}
     config = {
         'timestamp': timestamp,
         'run_name': args.run_name,
         'device': device,
-        'rescaling_factor': rescaling_factor,
-        **{k: v for k, v in vars(args).items() if k != 'rescaling_factor'},
+        **{k: v for k, v in vars(args).items() if k not in _filter_keys},
     }
     with open(os.path.join(output_dir, 'config.json'), 'w') as f:
         json.dump(config, f, indent=2)
@@ -310,22 +316,28 @@ def main():
     t_start = time.time()
 
     trainer.fit(network, dm)
-    
+
     t_train = time.time() - t_start
     h, m, s = int(t_train // 3600), int(t_train % 3600 // 60), int(t_train % 60)
-    print(f'Training complete in {h}h {m}m {s}s.')
+
+    es = trainer.early_stopping_callback
+    if es is not None and hasattr(es, 'stopped_epoch') and es.stopped_epoch > 0:
+        stop_reason = (f'early stopping triggered at epoch {es.stopped_epoch} '
+                       f'(patience={args.early_stopping_patience})')
+    else:
+        stop_reason = f'max epochs ({args.max_epochs}) reached'
+    print(f'Training complete in {h}h {m}m {s}s — {stop_reason}.')
 
     # ── Plot training curves ─────────────────────────────────────────────
     plots_dir = os.path.join(output_dir, 'plots')
-    plots_run_dir = os.path.join(plots_dir, run_label)
-    os.makedirs(plots_run_dir, exist_ok=True)
-
+    os.makedirs(plots_dir, exist_ok=True)
     utils.plot_training_curves(
         metrics_file=metrics_csv_path,
-        save_path=os.path.join(plots_run_dir, f'training_curves_{run_label}.png'),
+        save_path=os.path.join(plots_dir, f'training_curves_{run_label}.png'),
         title=f'{run_label} — trained in {h}h {m}m {s}s',
+        config=config,
     )
-    print(f'Training curves saved to {plots_run_dir}')
+    print(f'Training curves saved to {plots_dir}')
 
     # ── Save model ───────────────────────────────────────────────────────
     model_path = os.path.join(output_dir, 'model.pt')
@@ -366,7 +378,7 @@ def main():
         run_name=run_label,
         save_csv=True,
     )
-    print(f'Plots saved to {os.path.join(plots_dir, run_label)}')
+    print(f'Plots saved to {plots_dir}')
     plt.close('all')
 
     print('Running calibration diagnostics...')
@@ -381,7 +393,7 @@ def main():
         run_name=run_label,
         save_csv=True,
     )
-    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, run_label)}')
+    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, "calibration")}')
     plt.close('all')
 
     print(f'\nRun complete. All outputs saved to {output_dir}')

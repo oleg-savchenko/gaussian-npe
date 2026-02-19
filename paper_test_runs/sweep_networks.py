@@ -34,11 +34,11 @@ import argparse
 # LH (Latin Hypercube) is excluded — it targets a different dataset.
 NETWORKS = [
     'default',
-    'UNet_Only',
-    'WienerNet',
-    'LearnableFilter',
-    'SmoothFilter',
-    'Iterative',
+    # 'UNet_Only',
+    # 'WienerNet',
+    # 'LearnableFilter',
+    # 'SmoothFilter',
+    # 'Iterative',
 ]
 
 # ── SLURM header template ────────────────────────────────────────────
@@ -120,7 +120,7 @@ def main():
     parser.add_argument('--noise_seed', type=int, default=42)
     parser.add_argument('--store_path', type=str, default=None,
                         help='Override the default ZarrStore path')
-    parser.add_argument('--target_path', type=str, default=None,
+    parser.add_argument('--target_path', type=str, default='/home/osavchenko/Quijote/Quijote_target/Quijote_sample0_wout_MAK.pt',
                         help='Override the default target .pt file path')
 
     args = parser.parse_args()

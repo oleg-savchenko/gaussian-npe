@@ -101,8 +101,19 @@ class Precision_Matrix_Sum(GDG_Factor_Matrix):
     """
     def __init__(self, Q1, Q2):
         super().__init__()
-        self.Q1 = Q1
-        self.Q2 = Q2
+        # Store as a plain list (not nn.ModuleList) to avoid registering Q1
+        # and Q2 as submodules here — they are already registered at the
+        # parent network level, so using nn.Module attributes would double-
+        # count their parameters in PyTorch Lightning's model summary.
+        self._refs = [Q1, Q2]
+
+    @property
+    def Q1(self):
+        return self._refs[0]
+
+    @property
+    def Q2(self):
+        return self._refs[1]
 
     def G(self, x):
         return self.Q1.G(x)

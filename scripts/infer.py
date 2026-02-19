@@ -253,6 +253,7 @@ def main():
     # ── Plot ─────────────────────────────────────────────────────────────
     print('Plotting analysis...')
     plots_dir = os.path.join(output_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
     utils.plot_samples_analysis(
         delta_z127=delta_z127 / rescaling_factor,
         delta_z0=delta_z0,
@@ -267,7 +268,7 @@ def main():
         run_name=run_label,
         save_csv=True,
     )
-    print(f'Plots saved to {os.path.join(plots_dir, run_label)}')
+    print(f'Plots saved to {plots_dir}')
     plt.close('all')
 
     print('Running calibration diagnostics...')
@@ -282,7 +283,7 @@ def main():
         run_name=run_label,
         save_csv=True,
     )
-    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, run_label)}')
+    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, "calibration")}')
     plt.close('all')
 
     # ── Amortization test (optional) ────────────────────────────────────
@@ -320,7 +321,7 @@ def main():
             run_name=run_label,
             save_csv=True,
         )
-        print(f'Amortization test saved to {os.path.join(plots_dir, run_label, "amortization")}')
+        print(f'Amortization test saved to {os.path.join(plots_dir, "amortization")}')
         plt.close('all')
 
     print(f'\nInference complete. All outputs saved to {output_dir}')

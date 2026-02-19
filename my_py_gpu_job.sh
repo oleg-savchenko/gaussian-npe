@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=0:10:00
+#SBATCH --time=3:00:00
 #SBATCH --output=%x-%j-%N_slurm.out
 #SBATCH --error=R-%x.%j.err
 ## Activate right env
@@ -21,4 +21,4 @@ export OMP_NUM_THREADS=18
 export PYTHONNOUSERSITE=0
 
 cd /home/osavchenko/gaussian_npe
-srun python3 scripts/train.py --max_epochs 1 --num_samples 100
+srun python3 scripts/train.py --max_epochs 50 --num_samples 100 --run_name net_UNet_Only --network UNet_Only --max_epochs 50 #--n_train 100
