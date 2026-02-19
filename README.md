@@ -44,13 +44,40 @@ where **&epsilon;** is a white noise field. This requires only a single forward 
 ```
 gaussian_npe/               Python package
     __init__.py
-    Q_matrices.py           Precision matrix parametrizations (Q = G^T D G)
-    networks.py             Neural network classes (Gaussian_NPE_Network)
+    matrices.py             Precision matrix parametrizations (Q = G^T D G)
+    networks.py             Network architectures (Base + 7 variants)
     utils.py                Power spectra (CLASS, Pylians), growth factor,
                             Hartley transform, plotting & diagnostics
 scripts/
     train.py                Training script with argparse, timestamped runs, checkpointing
-    infer.py                Inference script: load a trained model, generate samples, plot
+    infer.py                Inference & amortization test script
+```
+
+## Network architectures
+
+All architectures share the same Gaussian posterior machinery (precision matrices, loss, sampling) via `Gaussian_NPE_Base`. They differ only in how the MAP estimator is computed:
+
+| Network | `--network` | Description |
+|---------|-------------|-------------|
+| `Gaussian_NPE_Network` | `default` | Sigmoid high-pass filter + learnable per-mode scale |
+| `Gaussian_NPE_UNet_Only` | `UNet_Only` | Minimal baseline: x + UNet(x), no Fourier-space operations |
+| `Gaussian_NPE_WienerNet` | `WienerNet` | Wiener filter + UNet residual correction |
+| `Gaussian_NPE_LearnableFilter` | `LearnableFilter` | Learnable per-mode filter (N^3 free parameters) + scale |
+| `Gaussian_NPE_SmoothFilter` | `SmoothFilter` | Learnable smooth isotropic filter (~20 log-spaced k-nodes) + scale |
+| `Gaussian_NPE_Iterative` | `Iterative` | Multi-step 2-channel UNet refinement + scale |
+| `Gaussian_NPE_LH` | `LH` | Default estimator with per-sample rescaling for Latin Hypercube runs |
+
+Class hierarchy:
+
+```
+Gaussian_NPE_Base  (abstract — Q matrices, UNet, loss, sample, forward)
+├── Gaussian_NPE_Network       (sigmoid filter + scale)
+│   └── Gaussian_NPE_LH        (per-sample rescaling)
+├── Gaussian_NPE_UNet_Only     (x + UNet(x))
+├── Gaussian_NPE_WienerNet     (Wiener filter + UNet)
+├── Gaussian_NPE_LearnableFilter  (N³ learnable filter + scale)
+├── Gaussian_NPE_SmoothFilter     (~20 k-node smooth filter + scale)
+└── Gaussian_NPE_Iterative        (iterative 2-channel UNet + scale)
 ```
 
 ## Training data
@@ -90,8 +117,9 @@ All hyperparameters can be set via command-line flags (see `python scripts/train
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--run_name` | `""` | Run identifier (appended to timestamp) |
-| `--store_path` | `./os240713-Swyft_Quijote_128_1Gpc` | Path to swyft ZarrStore |
-| `--target_path` | `./Quijote_target/Quijote_sample0.pt` | Target observation for diagnostics |
+| `--network` | `default` | Architecture (see table above) |
+| `--store_path` | *(cluster path)* | Path to swyft ZarrStore |
+| `--target_path` | *(cluster path)* | Target observation for diagnostics |
 | `--max_epochs` | 30 | Maximum training epochs |
 | `--sigma_noise` | 0.1 | Noise std added to observed field during training |
 | `--k_cut` | 0.03 | High-pass filter cutoff [h/Mpc] |
@@ -125,20 +153,40 @@ python scripts/infer.py --model_dir ./runs/20260216_153000_baseline
 | `--target_path` | from training config | Target observation `.pt` file |
 | `--num_samples` | 100 | Number of posterior samples |
 | `--run_name` | `""` | Inference run identifier |
+| `--target_dir` | `None` | Directory of held-out `.pt` files for amortization test |
 
 Inference outputs are saved to `{model_dir}/infer/{timestamp}_{run_name}/`.
 
 Generating 1000 posterior samples takes less than 3 seconds on GPU.
 
+#### Amortization test
+
+To evaluate calibration across many held-out observations:
+
+```bash
+python scripts/infer.py \
+    --model_dir ./runs/20260216_153000_baseline \
+    --target_dir ./Quijote_target \
+    --noise_seed 42
+```
+
 ### Diagnostic plots
 
-Both scripts produce diagnostic figures via `utils.plot_samples_analysis`:
+Both scripts produce diagnostic figures:
+
+**Sample analysis** (`plot_samples_analysis`):
 
 1. **Field slices** &mdash; true IC field, one posterior sample, and residual (3&times;3 grid at different slice depths)
 2. **Truth / MAP / posterior std** &mdash; side-by-side comparison
 3. **Summary statistics** &mdash; power spectrum P(k), transfer function T(k), and cross-correlation C(k) with 1&sigma;/2&sigma; bands from samples, plus MAP and linear theory curves
 4. **1-point PDF** &mdash; voxel histogram with skewness and kurtosis annotations
 5. **Reduced bispectrum** Q(&theta;) &mdash; two triangle configurations (equilateral and squeezed) with 1&sigma;/2&sigma; bands
+
+**Calibration diagnostics** (`plot_calibration_diagnostics`, saved to `calibration/` subfolder):
+
+6. **True vs predicted Hartley modes** &mdash; scatter plot with posterior error bars
+7. **Per-mode &chi;&sup2;** &mdash; D[k]&middot;r_h[k]&sup2; vs expected &chi;&sup2;(1) distribution
+8. **Calibration summary** &mdash; reduced &chi;&sup2;, z-score, skewness, kurtosis
 
 ## Citation
 

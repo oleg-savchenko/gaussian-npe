@@ -27,7 +27,6 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         self.rescaling_factor = rescaling_factor
         self.unet = UNet(1, 1, hid_chan=16, bypass=False)
 
-        self.prior = prior
         self.Q_prior = Precision_Matrix_From_Factors(*prior)
         self.Q_like = Precision_Matrix_FFT(self.N)
         self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
