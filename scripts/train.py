@@ -21,7 +21,7 @@ Usage:
         --n_train 500 \
         --learning_rate 0.01 \
         --early_stopping_patience 5 \
-        --lr_scheduler_patience 1 \
+        --lr_scheduler_patience 3 \
         --batch_size 8 \
         --val_fraction 0.2 \
         --num_workers 16 \
@@ -29,7 +29,8 @@ Usage:
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 100 \
         --MAS PCS \
-        --noise_seed 42
+        --noise_seed 42 \
+        --use_latex
 """
 
 import os
@@ -148,7 +149,7 @@ def parse_args():
         help='Early stopping patience (epochs without val_loss improvement)',
     )
     parser.add_argument(
-        '--lr_scheduler_patience', type=int, default=1,
+        '--lr_scheduler_patience', type=int, default=3,
         help='ReduceLROnPlateau patience (epochs before reducing LR)',
     )
     parser.add_argument(
@@ -192,12 +193,17 @@ def parse_args():
         '--noise_seed', type=int, default=42,
         help='Random seed for the observational noise added to the target field',
     )
+    parser.add_argument(
+        '--use_latex', action='store_true', default=False,
+        help='Use LaTeX rendering and scienceplots style for all plots',
+    )
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    utils.configure_matplotlib_style(use_latex=args.use_latex)
 
     # ── Timestamp & output directory ─────────────────────────────────────
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -281,6 +287,8 @@ def main():
         logger=tb_logger,
         max_epochs=args.max_epochs,
         callbacks=[lr_monitor, csv_callback],
+        enable_progress_bar=False,
+        log_every_n_steps=10,
     )
     dm = swyft.SwyftDataModule(
         store,

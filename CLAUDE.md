@@ -80,6 +80,7 @@ Uses `map2map.models.UNet` with `bypass=False` (no internal skip connection). Th
 - Plotting functions save PNGs to `plots/{run_name}/` with calibration in a `calibration/` subfolder and amortization in an `amortization/` subfolder.
 - `plot_samples_analysis`, `plot_calibration_diagnostics`, and `plot_amortization_test` accept `save_csv=False`. When True, they save CSV + human-readable txt files to a `diagnostics/` subfolder within their respective output directories. `train.py` and `infer.py` pass `save_csv=True`.
 - Config is saved as JSON at start of training and printed to stdout.
+- **Script header strings**: Both `train.py` and `infer.py` have a top-of-file docstring with a prose description and CLI usage examples. When adding, removing, or renaming any CLI argument, update the header docstring in the same script to keep it in sync.
 
 ## Running
 

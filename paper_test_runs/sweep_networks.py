@@ -1,18 +1,17 @@
 """
-Sweep over sigma_noise values for Gaussian NPE training.
+Sweep over all network architectures for Gaussian NPE training.
 
-Generates and submits one SLURM job per noise level. All training hyperparameters
+Generates and submits one SLURM job per network. All training hyperparameters
 can be overridden via CLI flags; defaults match train.py.
 All run outputs are saved under ./paper_test_runs/runs/.
 
 Usage:
-    python paper_test_runs/sweep_noise.py --dry_run
+    python paper_test_runs/sweep_networks.py --dry_run
 
-    python paper_test_runs/sweep_noise.py \
-        --sigma_noise_values 0.0 0.01 0.05 0.1 0.5 \
+    python paper_test_runs/sweep_networks.py \
         --output_dir paper_test_runs/runs \
-        --network default \
         --max_epochs 30 \
+        --sigma_noise 0.1 \
         --learning_rate 0.01 \
         --early_stopping_patience 5 \
         --lr_scheduler_patience 3 \
@@ -31,8 +30,16 @@ import os
 import subprocess
 import argparse
 
-# ── Default noise levels to sweep ────────────────────────────────────
-DEFAULT_SIGMA_NOISE_VALUES = [0.0, 0.01, 0.05, 0.1, 0.5]
+# ── Networks to sweep ────────────────────────────────────────────────
+# LH (Latin Hypercube) is excluded — it targets a different dataset.
+NETWORKS = [
+    'default',
+    'UNet_Only',
+    'WienerNet',
+    'LearnableFilter',
+    'SmoothFilter',
+    'Iterative',
+]
 
 # ── SLURM header template ────────────────────────────────────────────
 SLURM_HEADER = """\
@@ -55,14 +62,14 @@ cd /home/osavchenko/gaussian_npe
 """
 
 
-def build_train_cmd(run_name, sigma_noise, args):
-    """Build the train.py srun command for a given noise level."""
+def build_train_cmd(run_name, network, args):
+    """Build the train.py srun command for a given network."""
     parts = [
         f'    --run_name {run_name}',
         f'    --output_dir {args.output_dir}',
-        f'    --network {args.network}',
+        f'    --network {network}',
         f'    --max_epochs {args.max_epochs}',
-        f'    --sigma_noise {sigma_noise}',
+        f'    --sigma_noise {args.sigma_noise}',
         f'    --learning_rate {args.learning_rate}',
         f'    --early_stopping_patience {args.early_stopping_patience}',
         f'    --lr_scheduler_patience {args.lr_scheduler_patience}',
@@ -84,16 +91,13 @@ def build_train_cmd(run_name, sigma_noise, args):
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description='Sweep over sigma_noise values',
+        description='Sweep over all network architectures',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # ── Sweep control ────────────────────────────────────────────────
     parser.add_argument('--dry_run', action='store_true',
                         help='Print commands without submitting')
-    parser.add_argument('--sigma_noise_values', type=float, nargs='+',
-                        default=DEFAULT_SIGMA_NOISE_VALUES,
-                        help='List of sigma_noise values to sweep over')
     parser.add_argument('--output_dir', type=str, default='paper_test_runs/runs',
                         help='Base output directory for all runs')
 
@@ -104,8 +108,8 @@ def main():
                         help='SLURM --time wall-clock limit')
 
     # ── Training hyperparameters (same defaults as train.py) ─────────
-    parser.add_argument('--network', type=str, default='default')
     parser.add_argument('--max_epochs', type=int, default=30)
+    parser.add_argument('--sigma_noise', type=float, default=0.1)
     parser.add_argument('--learning_rate', type=float, default=1e-2)
     parser.add_argument('--early_stopping_patience', type=int, default=5)
     parser.add_argument('--lr_scheduler_patience', type=int, default=3)
@@ -128,15 +132,15 @@ def main():
     os.makedirs(jobs_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
 
-    for sigma in args.sigma_noise_values:
-        run_name = f'noise_{sigma}'
+    for network in NETWORKS:
+        run_name = f'net_{network}'
 
         header = SLURM_HEADER.format(
             run_name=run_name,
             cpus_per_task=args.cpus_per_task,
             time=args.time,
         )
-        script = header + build_train_cmd(run_name, sigma, args) + '\n'
+        script = header + build_train_cmd(run_name, network, args) + '\n'
 
         script_path = os.path.join(jobs_dir, f'{run_name}.sh')
         with open(script_path, 'w') as f:
@@ -144,12 +148,12 @@ def main():
 
         if args.dry_run:
             print(f'[dry run] would submit: {script_path}')
-            print(f'          sigma_noise={sigma}')
+            print(f'          network={network}')
         else:
-            print(f'Submitting: {run_name} (sigma_noise={sigma})')
+            print(f'Submitting: {run_name} (network={network})')
             subprocess.run(['sbatch', script_path], check=True)
 
-    print(f'\nDone. {len(args.sigma_noise_values)} jobs {"would be " if args.dry_run else ""}submitted.')
+    print(f'\nDone. {len(NETWORKS)} jobs {"would be " if args.dry_run else ""}submitted.')
     print(f'Run outputs will be saved to: {args.output_dir}/')
 
 

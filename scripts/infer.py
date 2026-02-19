@@ -15,13 +15,15 @@ Usage:
         --target_path ./Quijote_target/Quijote_sample0.pt \
         --num_samples 200 \
         --MAS PCS \
-        --noise_seed 42
+        --noise_seed 42 \
+        --use_latex
 
 Amortization test (run on many held-out observations):
     python scripts/infer.py \
         --model_dir ./runs/20260216_153000_baseline \
         --target_dir ./Quijote_target \
-        --noise_seed 42
+        --noise_seed 42 \
+        --use_latex
 """
 
 import os
@@ -126,12 +128,17 @@ def parse_args():
              'Each file must contain delta_z0 and delta_z127 keys. '
              'If provided, runs the amortization diagnostic after standard inference.',
     )
+    parser.add_argument(
+        '--use_latex', action='store_true', default=False,
+        help='Use LaTeX rendering and scienceplots style for all plots',
+    )
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    utils.configure_matplotlib_style(use_latex=args.use_latex)
 
     # ── Load training config ─────────────────────────────────────────────
     config_path = os.path.join(args.model_dir, 'config.json')

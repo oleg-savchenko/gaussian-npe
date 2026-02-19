@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=1:00:00
+#SBATCH --time=0:10:00
 #SBATCH --output=%x-%j-%N_slurm.out
 #SBATCH --error=R-%x.%j.err
 ## Activate right env
@@ -18,6 +18,7 @@ module load Python/3.12.3-GCCcore-13.3.0
 # module load UCX-CUDA/1.12.1-GCCcore-11.3.0-CUDA-11.7.0
 # module load UCX/1.12.1-GCCcore-11.3.0
 export OMP_NUM_THREADS=18
+export PYTHONNOUSERSITE=0
 
 cd /home/osavchenko/gaussian_npe
-srun python3 scripts/train.py --max_epochs 1
+srun python3 scripts/train.py --max_epochs 1 --num_samples 100

@@ -20,6 +20,9 @@ plots/
 Quijote_target/
 *.zarr
 
+# Legacy scripts
+scripts/os250301-Quijote_module_training.py
+
 # Python
 __pycache__/
 *.pyc

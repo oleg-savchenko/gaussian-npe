@@ -4,10 +4,48 @@ import torch
 import Pk_library as PKL
 from classy import Class
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import os
+from concurrent.futures import ProcessPoolExecutor
 from scipy.stats import skew, kurtosis, norm, kstest
 from scipy.ndimage import gaussian_filter1d  # just for smoothing the histogram curves
 from pytorch_lightning.callbacks import Callback
+
+
+def configure_matplotlib_style(use_latex=False):
+    """Set global matplotlib style. Call once at the start of a script before any plotting.
+
+    Parameters
+    ----------
+    use_latex : bool
+        If True, enable LaTeX rendering with Computer Modern serif fonts and the
+        scienceplots 'science' style. Requires a working LaTeX installation and
+        the scienceplots package. If False (default), use matplotlib's built-in
+        rendering with no external dependencies.
+    """
+    if use_latex:
+        import scienceplots  # noqa: F401 — registers the 'science' style
+        plt.style.use('science')
+        mpl.rc('text', usetex=True)
+        mpl.rc('font', **{'family': 'serif', 'serif': ['cmr10']})
+    else:
+        mpl.rcdefaults()
+
+
+def _compute_sample_pk(args):
+    """Module-level worker: compute XPk (auto + cross) for one sample vs truth field."""
+    s_i, delta_z127, box_size, MAS = args
+    Pk_i = PKL.XPk([s_i, delta_z127], box_size, axis=0, MAS=[MAS, MAS], threads=1)
+    pk_i = Pk_i.Pk[:, 0, 0]
+    xpk_i = Pk_i.XPk[:, 0, 0] / np.sqrt(Pk_i.Pk[:, 0, 0] * Pk_i.Pk[:, 0, 1])
+    return pk_i, xpk_i
+
+
+def _compute_sample_bk(args):
+    """Module-level worker: compute reduced bispectrum Q(theta) for one sample."""
+    s_i, box_size, k1, k2, theta, MAS = args
+    BBk_i = PKL.Bk(s_i, box_size, k1, k2, theta, MAS, threads=1)
+    return BBk_i.Q
 
 def get_pk_class(cosmo_params, z, k, non_lin = False):
     """While cosmo_params is the cosmological parameters, z is a single redshift,
@@ -189,7 +227,7 @@ def plot_training_curves(metrics_file, save_path, title=''):
     ax1.set_ylabel('Loss')
     ax1.legend()
     ax1.grid(alpha=0.15)
-    ax1.set_title('Training & validation loss')
+    ax1.set_title(r'Training \& validation loss')
 
     # Learning rate (per epoch)
     if 'lr' in rows[0]:
@@ -212,7 +250,7 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
                           Q_like_D=None, Q_prior_D=None,
                           save_dir='./plots', run_name='',
-                          save_csv=False):
+                          save_csv=False, n_workers=None):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
 
     Produces up to six figures:
@@ -325,32 +363,25 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
     k_pylians, pk_ic = box_cpu.get_pk_pylians(delta_z127, MAS=MAS)
 
     # MAP P(k) and cross-correlation with truth
-    _, pk_MAP = box_cpu.get_pk_pylians(z_MAP, MAS=MAS)
-    tk_MAP = np.sqrt(pk_MAP / pk_ic)
-
+    # XPk gives auto-spectra of both fields, so no separate PKL.Pk call needed
     Pk_MAP = PKL.XPk([z_MAP, delta_z127], box_cpu.box_size, axis=0,
                       MAS=[MAS, MAS], threads=1)
-    xpk_MAP = Pk_MAP.XPk[:, 0, 0] / (Pk_MAP.Pk[:, 0, 0] * Pk_MAP.Pk[:, 0, 1])**0.5
+    pk_MAP = Pk_MAP.Pk[:, 0, 0]
+    tk_MAP = np.sqrt(pk_MAP / pk_ic)
+    xpk_MAP = Pk_MAP.XPk[:, 0, 0] / np.sqrt(Pk_MAP.Pk[:, 0, 0] * Pk_MAP.Pk[:, 0, 1])
 
     # Cross-correlation between IC and final field (linear baseline)
     Pk_lin = PKL.XPk([delta_z127, delta_z0], box_cpu.box_size, axis=0,
                       MAS=[MAS, MAS], threads=1)
-    xpk_linear = Pk_lin.XPk[:, 0, 0] / (Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])**0.5
+    xpk_linear = Pk_lin.XPk[:, 0, 0] / np.sqrt(Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])
 
-    # Samples P(k), T(k), C(k)
-    pks, tks, xpks = [], [], []
-    for i in range(len(samples)):
-        s_i = samples[i]
-        _, pk_i = box_cpu.get_pk_pylians(s_i, MAS=MAS)
-        Pk_i = PKL.XPk([s_i, delta_z127], box_cpu.box_size, axis=0,
-                        MAS=[MAS, MAS], threads=1)
-        pks.append(pk_i)
-        tks.append(np.sqrt(pk_i / pk_ic))
-        xpks.append(Pk_i.XPk[:, 0, 0] / (Pk_i.Pk[:, 0, 0] * Pk_i.Pk[:, 0, 1])**0.5)
-
-    pks = np.array(pks)
-    tks = np.array(tks)
-    xpks = np.array(xpks)
+    # Samples P(k), T(k), C(k) — parallelised over samples
+    pk_args = [(samples[i], delta_z127, box_cpu.box_size, MAS) for i in range(len(samples))]
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        pk_results = list(executor.map(_compute_sample_pk, pk_args))
+    pks = np.array([r[0] for r in pk_results])
+    xpks = np.array([r[1] for r in pk_results])
+    tks = np.sqrt(pks / pk_ic)
 
     # Optional: linear theory P(k) from CLASS
     if cosmo_params is not None:
@@ -448,13 +479,11 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cfg['k1'], cfg['k2'], theta, MAS, threads=1)
         Qk_true = BBk_true.Q
 
-        # Sample bispectra
-        Qks = []
-        for i in range(len(samples)):
-            BBk_i = PKL.Bk(samples[i], box_cpu.box_size,
-                           cfg['k1'], cfg['k2'], theta, MAS, threads=1)
-            Qks.append(BBk_i.Q)
-        Qks = np.array(Qks)
+        # Sample bispectra — parallelised over samples
+        bk_args = [(samples[i], box_cpu.box_size, cfg['k1'], cfg['k2'], theta, MAS)
+                   for i in range(len(samples))]
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            Qks = np.array(list(executor.map(_compute_sample_bk, bk_args)))
 
         ax.plot(theta_deg, Qk_true, marker='.', markersize=3, lw=1,
                 label='True', zorder=10)
@@ -531,9 +560,9 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
             'kurtosis_true', 'kurtosis_samples_mean', 'kurtosis_samples_std',
         ]
         scalar_vals = [
-            float(skew(delta_z127.ravel(), bias=False)),
+            float(skew(delta_z127.ravel().astype(np.float64), bias=False)),
             float(np.mean(g1)), float(np.std(g1, ddof=1)),
-            float(kurtosis(delta_z127.ravel(), fisher=True, bias=False)),
+            float(kurtosis(delta_z127.ravel().astype(np.float64), fisher=True, bias=False)),
             float(np.mean(g2)), float(np.std(g2, ddof=1)),
         ]
         with open(os.path.join(diag_dir, f'scalars_samples_{run_name}.csv'), 'w', newline='') as f:
@@ -1143,3 +1172,7 @@ class MetricsCSVCallback(Callback):
 
         with open(self.filepath, 'a') as f:
             f.write(f'{epoch},{step},{train_loss},{val_loss},{lr}\n')
+
+        train_str = f'{train_loss:.4f}' if train_loss != '' else 'n/a'
+        val_str   = f'{val_loss:.4f}'   if val_loss   != '' else 'n/a'
+        print(f'Epoch {epoch:3d} | step {step:6d} | train_loss {train_str} | val_loss {val_str} | lr {lr:.2e}')
