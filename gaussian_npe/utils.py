@@ -9,6 +9,7 @@ import matplotlib as mpl
 import os
 from concurrent.futures import ProcessPoolExecutor
 from scipy.stats import skew, kurtosis, norm, kstest
+from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d  # just for smoothing the histogram curves
 from pytorch_lightning.callbacks import Callback
 
@@ -187,6 +188,57 @@ class Power_Spectrum_Sampler:
         return k_pylians, pk_pylians
 
 
+class LinearWienerFilter:
+    """Analytical Wiener filter baseline for IC reconstruction.
+
+    Posterior mean and samples under the Gaussian-linear approximation
+    (x ≈ z_internal + n, white noise sigma_noise).  Wiener weight per mode:
+
+        w(k) = D_like / (D_prior(k) + D_like),   D_like = 1/sigma_noise^2
+
+    D_like is fixed analytically (cf. Gaussian_NPE_WienerNet where it is
+    learned).  Interface matches the network classes for drop-in comparison.
+    """
+
+    def __init__(self, box, prior, sigma_noise, rescaling_factor=1.0):
+        self.box = box
+        self.rescaling_factor = rescaling_factor
+        self.sigma_noise = sigma_noise
+
+        G_T, D_prior, G = prior
+        self.G   = G
+        self.G_T = G_T
+        self.D_prior = D_prior                          # (N^3,) tensor
+        self.D_like  = 1.0 / sigma_noise**2             # scalar
+        self.D_post  = self.D_prior + self.D_like       # (N^3,) tensor
+
+    def get_z_MAP(self, x_obs):
+        """Wiener filter MAP estimate. x_obs: (N,N,N) → delta_z127 (N,N,N), physical space."""
+        x_h = self.G(x_obs.unsqueeze(0))               # (1, N^3)
+        w   = self.D_like / self.D_post                 # (N^3,)  Wiener weight
+        z_h = w * x_h                                   # (1, N^3)
+        z   = self.G_T(z_h).squeeze(0)                  # (N, N, N) internal space
+        z   = z * self.rescaling_factor                 # → physical space
+        return z - z.mean()
+
+    def sample(self, num_samples, x_obs=None, z_MAP=None, to_numpy=True):
+        """Draw posterior samples. Provide exactly one of x_obs or z_MAP."""
+        if (x_obs is None) == (z_MAP is None):
+            raise ValueError("Provide exactly one of x_obs or z_MAP")
+        if z_MAP is None:
+            z_MAP = self.get_z_MAP(x_obs)
+
+        # Posterior std per Hartley mode, scaled back to physical space
+        std = (self.D_post ** -0.5) * self.rescaling_factor   # (N^3,)
+
+        draws = []
+        for _ in range(num_samples):
+            noise = self.G_T(std * torch.randn_like(self.D_post))  # (N, N, N)
+            z = noise + z_MAP
+            draws.append(z.cpu().numpy() if to_numpy else z.cpu())
+        return draws
+
+
 def plot_training_curves(metrics_file, save_path, title='', config=None):
     """Plot training/validation loss and learning rate from a metrics CSV.
 
@@ -284,6 +336,94 @@ def plot_training_curves(metrics_file, save_path, title='', config=None):
     plt.close(fig)
 
 
+def fit_D_spectrum(k_flat, D_like, D_prior=None, n_bins=40, k_min=None, k_max=None):
+    """Bin D_like by |k| and fit a Gaussian-in-log10(k) model.
+
+    Model: D_like_fit(k) = A * exp(-((log10(k) - mu) / sigma)^2) + c
+
+    The additive constant c captures the non-zero floor that D_like approaches
+    at the largest scales (smallest k), where the network has learned some but
+    limited information.
+
+    Parameters
+    ----------
+    k_flat   : ndarray (N,)           Wavenumber magnitudes; k=0 and k>k_Nyq should
+                                      already be excluded by the caller.
+    D_like   : ndarray (N,)           D_like values at the same modes.
+    D_prior  : ndarray (N,), optional D_prior values at the same modes.  If given,
+                                      the function also returns their bin means so the
+                                      caller can reconstruct D_post_fit analytically.
+    n_bins   : int                    Number of log-spaced k bins.
+    k_min, k_max : float, optional    Further restrict the fitting range (h/Mpc).
+
+    Returns
+    -------
+    popt          : ndarray [A, mu, sigma, c]     Best-fit parameters.
+    perr          : ndarray [dA, dmu, dsigma, dc]  1-sigma parameter uncertainties.
+    D_fit_func    : callable k -> D_like_fit   Fitted analytical function.
+    k_bins        : ndarray (n_bins,)          Geometric-mean bin centres.
+    D_like_means  : ndarray (n_bins,)          Mean D_like per bin (nan if < 2 modes).
+    D_like_stds   : ndarray (n_bins,)          Std  D_like per bin (nan if < 2 modes).
+    D_prior_means : ndarray (n_bins,) or None  Mean D_prior per bin (None if not given).
+    N_modes       : ndarray (n_bins,)          Mode count per bin.
+    """
+    # Optional k-range restriction on top of whatever the caller already masked
+    mask = np.ones(len(k_flat), dtype=bool)
+    if k_min is not None:
+        mask &= k_flat >= k_min
+    if k_max is not None:
+        mask &= k_flat <= k_max
+    k_m = k_flat[mask]
+    D_m = D_like[mask]
+    D_pr = D_prior[mask] if D_prior is not None else None
+
+    # Log-spaced bin edges; assign each mode to a bin
+    bin_edges = np.geomspace(k_m.min(), k_m.max(), n_bins + 1)
+    bin_idx = np.clip(np.digitize(k_m, bin_edges) - 1, 0, n_bins - 1)
+
+    k_bins = np.sqrt(bin_edges[:-1] * bin_edges[1:])   # geometric-mean centres
+    D_like_means = np.full(n_bins, np.nan)
+    D_like_stds  = np.full(n_bins, np.nan)
+    D_prior_means = np.full(n_bins, np.nan) if D_pr is not None else None
+    N_modes = np.zeros(n_bins, dtype=int)
+
+    for i in range(n_bins):
+        in_bin = bin_idx == i
+        N_k = int(in_bin.sum())
+        N_modes[i] = N_k
+        if N_k >= 2:
+            D_like_means[i] = np.mean(D_m[in_bin])
+            D_like_stds[i]  = np.std(D_m[in_bin], ddof=1)
+        if D_pr is not None and N_k >= 1:
+            D_prior_means[i] = np.mean(D_pr[in_bin])
+
+    # Select bins suitable for fitting: finite mean, finite and positive std
+    valid = np.isfinite(D_like_means) & np.isfinite(D_like_stds) & (D_like_stds > 0)
+
+    def _gaussian_log10k(k, A, mu, sigma, c):
+        return A * np.exp(-((np.log10(k) - mu) / sigma) ** 2) + c
+
+    # Initial guesses: peak of the binned data; floor from the smallest-k bin
+    peak_i = np.nanargmax(D_like_means)
+    finite_means = D_like_means[np.isfinite(D_like_means)]
+    c0 = float(np.nanmin(finite_means)) if len(finite_means) > 0 else 0.0
+    c0 = max(c0, 0.0)
+    p0 = [D_like_means[peak_i] - c0, np.log10(k_bins[peak_i]), 0.5, c0]
+
+    popt, pcov = curve_fit(
+        _gaussian_log10k,
+        k_bins[valid], D_like_means[valid],
+        p0=p0,
+        sigma=D_like_stds[valid],
+        absolute_sigma=True,
+        maxfev=10000,
+    )
+    perr = np.sqrt(np.diag(pcov))
+    D_fit_func = lambda k, _p=popt: _gaussian_log10k(k, *_p)   # noqa: E731
+
+    return popt, perr, D_fit_func, k_bins, D_like_means, D_like_stds, D_prior_means, N_modes
+
+
 def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
                           Q_like_D=None, Q_prior_D=None,
@@ -291,13 +431,17 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           save_csv=False, n_workers=None):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
 
+    When ``samples`` is None or empty, all figures are produced in MAP-only mode:
+    sample uncertainty bands are omitted, and the MAP estimate is used wherever
+    a representative field is needed (field slice, 1pt PDF, bispectrum).
+
     Produces up to six figures:
-      1. Field slices: true IC, one posterior sample, and residual (3x3 grid).
-      2. Truth vs MAP vs posterior std (1x3).
-      3. Summary statistics: power spectrum, transfer function, and cross-correlation
-         of the samples and MAP estimate relative to the ground truth, with 1/2-sigma bands.
-      4. 1-point PDF comparison with skewness and kurtosis annotations.
-      5. Reduced bispectrum Q(theta) for two triangle configurations.
+      1. 1-point PDF of truth vs samples (or MAP) with skewness and kurtosis annotations.
+      2. Summary statistics: power spectrum, transfer function, and cross-correlation
+         of the MAP estimate (and samples when available) relative to the ground truth.
+      3. Reduced bispectrum Q(theta) of truth vs samples (or MAP), always with MAP line.
+      4. Field slices: true IC, one posterior sample (or MAP), and residual (3x3 grid).
+      5. Truth vs MAP vs posterior std (or MAP residual when no samples) (1x3).
       6. Precision matrix diagonals D_like, D_prior, D_posterior vs k (if provided).
 
     Parameters
@@ -326,28 +470,206 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = save_dir
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
 
     plt.rcParams['figure.facecolor'] = 'white'
 
     delta_z127 = delta_z127.astype('f')
     delta_z0 = delta_z0.astype('f')
-    samples = np.asarray(samples).astype('f')
     z_MAP = z_MAP.astype('f')
 
-    sample = samples[0]
-    std = samples.std(axis=0)
-    residual = sample - delta_z127
+    N = delta_z127.shape[0]
+    color_samples = 'forestgreen'
 
-    # ── Figure 1: field slices (3×3) ──────────────────────────────────────
+    has_samples = samples is not None and np.asarray(samples).size > 0
+    if has_samples:
+        samples = np.asarray(samples).astype('f')
+        sample = samples[0]
+        std = samples.std(axis=0)
+        residual = sample - delta_z127
+    else:
+        samples = None
+        sample = z_MAP
+        std = None
+        residual = z_MAP - delta_z127
+
+    # ── Figure 1: 1-point PDF with skewness & kurtosis ───────────────────
+    fields_for_pdf = samples if has_samples else z_MAP[np.newaxis]
+    fig, ax = plot_1pt_pdf_with_skew_kurt(delta_z127, fields_for_pdf)
+    fig.savefig(os.path.join(save_dir, f'1_1pt_pdf_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Compute summary statistics ────────────────────────────────────────
+    k_Nq = box.k_Nq
+
+    # XPk gives auto-spectra of both fields and cross-spectrum in one pass
+    Pk_MAP = PKL.XPk([z_MAP, delta_z127], box.box_size, axis=0,
+                      MAS=[MAS, MAS], threads=1)
+    k_pylians = Pk_MAP.k3D
+    pk_MAP    = Pk_MAP.Pk[:, 0, 0]
+    pk_ic     = Pk_MAP.Pk[:, 0, 1]
+    tk_MAP    = np.sqrt(pk_MAP / pk_ic)
+    xpk_MAP   = Pk_MAP.XPk[:, 0, 0] / np.sqrt(pk_MAP * pk_ic)
+
+    # Cross-correlation between IC and final field (linear baseline)
+    Pk_lin = PKL.XPk([delta_z127, delta_z0], box.box_size, axis=0,
+                      MAS=[MAS, MAS], threads=1)
+    xpk_linear = Pk_lin.XPk[:, 0, 0] / np.sqrt(Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])
+
+    # Samples P(k), T(k), C(k) — parallelised over samples (skipped in MAP-only mode)
+    if has_samples:
+        pk_args = [(samples[i], delta_z127, box.box_size, MAS) for i in range(len(samples))]
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            pk_results = list(executor.map(_compute_sample_pk, pk_args))
+        pks  = np.array([r[0] for r in pk_results])
+        xpks = np.array([r[1] for r in pk_results])
+        tks  = np.sqrt(pks / pk_ic)
+        pks_mean,  pks_std  = pks.mean(0),  pks.std(0)
+        tks_mean,  tks_std  = tks.mean(0),  tks.std(0)
+        xpks_mean, xpks_std = xpks.mean(0), xpks.std(0)
+    else:
+        pks = xpks = tks = None
+
+    # Optional: linear theory P(k) from CLASS
+    if cosmo_params is not None:
+        k_lin = np.logspace(np.log10(1e-4), np.log10(10), 100)
+        pk_class_z0 = get_pk_class(cosmo_params, 0, k_lin)
+
+    # ── Figure 2: summary statistics ──────────────────────────────────────
+    fig, axs = plt.subplots(3, sharex=True, sharey=False, height_ratios=[2, 1, 1])
+    fig.set_size_inches(4, 8)
+
+    # ── P(k) ──
+    ax = axs[0]
+    ax.plot(k_pylians, pk_ic, marker='.', markersize=0.5, lw=0.5,
+            label='True', zorder=10)
+    if has_samples:
+        ax.plot(k_pylians, pks_mean, lw=0.5, color=color_samples, label='Samples')
+        ax.fill_between(k_pylians,
+                         pks_mean - pks_std, pks_mean + pks_std,
+                         alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                         pks_mean - 2 * pks_std, pks_mean + 2 * pks_std,
+                         alpha=0.25, color=color_samples)
+    ax.plot(k_pylians, pk_MAP, color='magenta', label='MAP', alpha=0.75, lw=0.5)
+    if cosmo_params is not None:
+        ax.plot(k_lin, pk_class_z0, label='Linear', color='black', alpha=0.3, lw=0.5)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm{Nyq}}$')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_ylabel(r'$P(k)$', fontsize=16)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
+    ax.set_ylim([5e2, 5e4])
+    ax.set_xlim(left=k_pylians[0], right=k_Nq + 0.075)
+    ax.grid(which='both', alpha=0.125)
+
+    # ── T(k) ──
+    ax = axs[1]
+    if has_samples:
+        ax.plot(k_pylians, tks_mean, color=color_samples)
+        ax.fill_between(k_pylians,
+                         tks_mean - tks_std, tks_mean + tks_std,
+                         alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                         tks_mean - 2 * tks_std, tks_mean + 2 * tks_std,
+                         alpha=0.25, color=color_samples)
+    ax.plot(k_pylians, tk_MAP, color='magenta', alpha=0.75, lw=0.5)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
+    ax.axhline(1.0, color='k', ls='--', lw=0.5)
+    ax.set_xscale('log')
+    ax.set_ylabel(r'$T(k)$', fontsize=16)
+    ax.set_ylim(0.93, 1.07)
+    ax.set_yticks([0.95, 1.0, 1.05])
+    ax.grid(which='both', alpha=0.1)
+
+    # ── C(k) ──
+    ax = axs[2]
+    ax.plot(k_pylians, xpk_MAP, color='magenta', alpha=0.75, lw=0.5)
+    ax.plot(k_pylians, xpk_linear, alpha=0.75, lw=0.5, color='orange', label=r'$z=0$')
+    if has_samples:
+        ax.plot(k_pylians, xpks_mean, color=color_samples, lw=0.25)
+        ax.fill_between(k_pylians,
+                         xpks_mean - xpks_std, xpks_mean + xpks_std,
+                         alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                         xpks_mean - 2 * xpks_std, xpks_mean + 2 * xpks_std,
+                         alpha=0.25, color=color_samples)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
+    ax.axhline(1.0, color='k', ls='--', lw=0.5)
+    ax.set_xscale('log')
+    ax.set_ylabel(r'$C(k)$', fontsize=16)
+    ax.set_xlabel(r'$k$ [$h / \rm{Mpc}$]', fontsize=14)
+    ax.set_ylim([-0.2, 1.2])
+    ax.set_yticks([0, 0.5, 1.0])
+    ax.grid(which='both', alpha=0.1)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.9, loc='lower left')
+
+    plt.subplots_adjust(hspace=0)
+    fig.savefig(os.path.join(save_dir, f'2_summary_stats_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Figure 3: reduced bispectrum Q(theta) ────────────────────────────
+    theta = np.linspace(0, np.pi, 25)
+    # Two triangle configs: equilateral (k1=k2=0.1) and squeezed (k1=0.05, k2=0.1)
+    bispec_configs = [
+        {'k1': 0.1, 'k2': 0.1, 'label': r'$k_1 = k_2 = 0.1\;h/\mathrm{Mpc}$'},
+        {'k1': 0.05, 'k2': 0.1, 'label': r'$k_1 = 0.05,\; k_2 = 0.1\;h/\mathrm{Mpc}$'},
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    theta_deg = np.degrees(theta)
+
+    for ax, cfg in zip(axes, bispec_configs):
+        # True field bispectrum
+        BBk_true = PKL.Bk(delta_z127, box.box_size,
+                          cfg['k1'], cfg['k2'], theta, MAS, threads=1)
+        Qk_true = BBk_true.Q
+
+        # MAP bispectrum
+        BBk_MAP = PKL.Bk(z_MAP, box.box_size,
+                         cfg['k1'], cfg['k2'], theta, MAS, threads=1)
+        Qk_MAP = BBk_MAP.Q
+
+        # Sample bispectra — parallelised over samples (skipped in MAP-only mode)
+        if has_samples:
+            bk_args = [(samples[i], box.box_size, cfg['k1'], cfg['k2'], theta, MAS)
+                       for i in range(len(samples))]
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                Qks = np.array(list(executor.map(_compute_sample_bk, bk_args)))
+
+        ax.plot(theta_deg, Qk_true, marker='.', markersize=3, lw=1,
+                label='True', zorder=10)
+        if has_samples:
+            Qks_mean, Qks_std = Qks.mean(0), Qks.std(0)
+            ax.plot(theta_deg, Qks_mean, lw=1, color=color_samples, label='Samples')
+            ax.fill_between(theta_deg,
+                             Qks_mean - Qks_std, Qks_mean + Qks_std,
+                             alpha=0.75, color=color_samples)
+            ax.fill_between(theta_deg,
+                             Qks_mean - 2 * Qks_std, Qks_mean + 2 * Qks_std,
+                             alpha=0.25, color=color_samples)
+        ax.plot(theta_deg, Qk_MAP, color='magenta', label='MAP', alpha=0.75, lw=1)
+
+        ax.set_xlabel(r'$\theta$ [deg]', fontsize=14)
+        ax.set_title(cfg['label'], fontsize=11)
+        ax.grid(alpha=0.15)
+        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+
+    axes[0].set_ylabel(r'$Q(\theta)$', fontsize=16)
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'3_bispectrum_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Figure 4: field slices (3×3) ──────────────────────────────────────
     fig, axes = plt.subplots(3, 3, figsize=(16, 18), sharey=True)
     vmin, vmax = -3, 3
-    row_labels = ['True IC', 'Posterior sample', 'Residual']
+    if has_samples:
+        row_labels = ['True IC', 'Posterior sample', 'Residual']
+    else:
+        row_labels = ['True IC', 'MAP estimate', 'MAP residual']
     row_data = [delta_z127, sample, residual]
     row_vlims = [(vmin, vmax), (vmin, vmax), (vmin / 2, vmax / 2)]
 
-    N = delta_z127.shape[0]
     slices = [N // 4, N // 4 + N // 8, N // 2]
 
     for row, (data, label, (lo, hi)) in enumerate(zip(row_data, row_labels, row_vlims)):
@@ -365,16 +687,21 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         ])
         plt.colorbar(im, cax=cbar_ax)
 
-    fig.savefig(os.path.join(out_dir, f'field_slices_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'4_field_slices_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
 
-    # ── Figure 2: truth / MAP / posterior std ─────────────────────────────
+    # ── Figure 5: truth / MAP / posterior std ─────────────────────────────
     fig, axes = plt.subplots(1, 3, figsize=(16, 6), sharey=True)
     slice_idx = N // 2
 
+    if has_samples:
+        third_panel = (std[slice_idx], 'Posterior std', 'Purples', None, None)
+    else:
+        third_panel = (residual[slice_idx], 'MAP residual', 'seismic', vmin / 2, vmax / 2)
     panels = [
         (delta_z127[slice_idx], 'True field', 'seismic', vmin, vmax),
         (z_MAP[slice_idx], 'MAP estimate', 'seismic', vmin, vmax),
-        (std[slice_idx], 'Posterior std', 'Purples', None, None),
+        third_panel,
     ]
     for ax, (data, title, cmap, lo, hi) in zip(axes, panels):
         im = ax.imshow(data, origin='lower', cmap=cmap, vmin=lo, vmax=hi)
@@ -389,160 +716,8 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         plt.colorbar(im, cax=cbar_ax)
     axes[0].set_ylabel('y (voxels)', fontsize=14)
 
-    fig.savefig(os.path.join(out_dir, f'truth_MAP_std_{run_name}.png'), bbox_inches='tight')
-
-    # ── Compute summary statistics ────────────────────────────────────────
-    box_cpu = Power_Spectrum_Sampler(
-        {'box_size': box.box_size, 'grid_res': box.N}, device='cpu',
-    )
-    k_Nq = box_cpu.k_Nq
-
-    # True field P(k)
-    k_pylians, pk_ic = box_cpu.get_pk_pylians(delta_z127, MAS=MAS)
-
-    # MAP P(k) and cross-correlation with truth
-    # XPk gives auto-spectra of both fields, so no separate PKL.Pk call needed
-    Pk_MAP = PKL.XPk([z_MAP, delta_z127], box_cpu.box_size, axis=0,
-                      MAS=[MAS, MAS], threads=1)
-    pk_MAP = Pk_MAP.Pk[:, 0, 0]
-    tk_MAP = np.sqrt(pk_MAP / pk_ic)
-    xpk_MAP = Pk_MAP.XPk[:, 0, 0] / np.sqrt(Pk_MAP.Pk[:, 0, 0] * Pk_MAP.Pk[:, 0, 1])
-
-    # Cross-correlation between IC and final field (linear baseline)
-    Pk_lin = PKL.XPk([delta_z127, delta_z0], box_cpu.box_size, axis=0,
-                      MAS=[MAS, MAS], threads=1)
-    xpk_linear = Pk_lin.XPk[:, 0, 0] / np.sqrt(Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])
-
-    # Samples P(k), T(k), C(k) — parallelised over samples
-    pk_args = [(samples[i], delta_z127, box_cpu.box_size, MAS) for i in range(len(samples))]
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        pk_results = list(executor.map(_compute_sample_pk, pk_args))
-    pks = np.array([r[0] for r in pk_results])
-    xpks = np.array([r[1] for r in pk_results])
-    tks = np.sqrt(pks / pk_ic)
-
-    # Optional: linear theory P(k) from CLASS
-    if cosmo_params is not None:
-        k_lin = np.logspace(np.log10(1e-4), np.log10(10), 100)
-        pk_class_z0 = get_pk_class(cosmo_params, 0, k_lin)
-
-    # ── Figure 3: summary statistics ──────────────────────────────────────
-    fig, axs = plt.subplots(3, sharex=True, sharey=False, height_ratios=[2, 1, 1])
-    fig.set_size_inches(4, 8)
-    color_samples = 'forestgreen'
-
-    # ── P(k) ──
-    ax = axs[0]
-    ax.plot(k_pylians, pk_ic, marker='.', markersize=0.5, lw=0.5,
-            label='True', zorder=10)
-    ax.plot(k_pylians, pks.mean(0), lw=0.5, color=color_samples, label='Samples')
-    ax.fill_between(k_pylians,
-                     pks.mean(0) - pks.std(0), pks.mean(0) + pks.std(0),
-                     alpha=0.75, color=color_samples)
-    ax.fill_between(k_pylians,
-                     pks.mean(0) - 2 * pks.std(0), pks.mean(0) + 2 * pks.std(0),
-                     alpha=0.25, color=color_samples)
-    ax.plot(k_pylians, pk_MAP, color='magenta', label='MAP', alpha=0.75, lw=0.5)
-    if cosmo_params is not None:
-        ax.plot(k_lin, pk_class_z0, label='Linear', color='black', alpha=0.3, lw=0.5)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm{Nyq}}$')
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_ylabel(r'$P(k)$', fontsize=16)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
-    ax.set_ylim([5e2, 5e4])
-    ax.set_xlim(left=k_pylians[0], right=k_Nq + 0.075)
-    ax.grid(which='both', alpha=0.125)
-
-    # ── T(k) ──
-    ax = axs[1]
-    ax.plot(k_pylians, tks.mean(0), color=color_samples)
-    ax.fill_between(k_pylians,
-                     tks.mean(0) - tks.std(0), tks.mean(0) + tks.std(0),
-                     alpha=0.75, color=color_samples)
-    ax.fill_between(k_pylians,
-                     tks.mean(0) - 2 * tks.std(0), tks.mean(0) + 2 * tks.std(0),
-                     alpha=0.25, color=color_samples)
-    ax.plot(k_pylians, tk_MAP, color='magenta', alpha=0.75, lw=0.5)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
-    ax.axhline(1.0, color='k', ls='--', lw=0.5)
-    ax.set_xscale('log')
-    ax.set_ylabel(r'$T(k)$', fontsize=16)
-    ax.set_ylim(0.93, 1.07)
-    ax.set_yticks([0.95, 1.0, 1.05])
-    ax.grid(which='both', alpha=0.1)
-
-    # ── C(k) ──
-    ax = axs[2]
-    ax.plot(k_pylians, xpk_MAP, color='magenta', alpha=0.75, lw=0.5)
-    ax.plot(k_pylians, xpk_linear, alpha=0.75, lw=0.5, color='orange', label=r'$z=0$')
-    ax.plot(k_pylians, xpks.mean(0), color=color_samples, lw=0.25)
-    ax.fill_between(k_pylians,
-                     xpks.mean(0) - xpks.std(0), xpks.mean(0) + xpks.std(0),
-                     alpha=0.75, color=color_samples)
-    ax.fill_between(k_pylians,
-                     xpks.mean(0) - 2 * xpks.std(0), xpks.mean(0) + 2 * xpks.std(0),
-                     alpha=0.25, color=color_samples)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
-    ax.axhline(1.0, color='k', ls='--', lw=0.5)
-    ax.set_xscale('log')
-    ax.set_ylabel(r'$C(k)$', fontsize=16)
-    ax.set_xlabel(r'$k$ [$h / \rm{Mpc}$]', fontsize=14)
-    ax.set_ylim([-0.2, 1.2])
-    ax.set_yticks([0, 0.5, 1.0])
-    ax.grid(which='both', alpha=0.1)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.9, loc='lower left')
-
-    plt.subplots_adjust(hspace=0)
-    fig.savefig(os.path.join(out_dir, f'summary_stats_{run_name}.png'), bbox_inches='tight')
-
-    # ── Figure 4: 1-point PDF with skewness & kurtosis ───────────────────
-    fig, ax = plot_1pt_pdf_with_skew_kurt(delta_z127, samples)
-    fig.savefig(os.path.join(out_dir, f'1pt_pdf_{run_name}.png'), bbox_inches='tight')
-
-    # ── Figure 5: reduced bispectrum Q(theta) ────────────────────────────
-    theta = np.linspace(0, np.pi, 25)
-    # Two triangle configs: equilateral (k1=k2=0.1) and squeezed (k1=0.05, k2=0.1)
-    bispec_configs = [
-        {'k1': 0.1, 'k2': 0.1, 'label': r'$k_1 = k_2 = 0.1\;h/\mathrm{Mpc}$'},
-        {'k1': 0.05, 'k2': 0.1, 'label': r'$k_1 = 0.05,\; k_2 = 0.1\;h/\mathrm{Mpc}$'},
-    ]
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-    theta_deg = np.degrees(theta)
-
-    for ax, cfg in zip(axes, bispec_configs):
-        # True field bispectrum
-        BBk_true = PKL.Bk(delta_z127, box_cpu.box_size,
-                          cfg['k1'], cfg['k2'], theta, MAS, threads=1)
-        Qk_true = BBk_true.Q
-
-        # Sample bispectra — parallelised over samples
-        bk_args = [(samples[i], box_cpu.box_size, cfg['k1'], cfg['k2'], theta, MAS)
-                   for i in range(len(samples))]
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            Qks = np.array(list(executor.map(_compute_sample_bk, bk_args)))
-
-        ax.plot(theta_deg, Qk_true, marker='.', markersize=3, lw=1,
-                label='True', zorder=10)
-        ax.plot(theta_deg, Qks.mean(0), lw=1, color=color_samples, label='Samples')
-        ax.fill_between(theta_deg,
-                         Qks.mean(0) - Qks.std(0),
-                         Qks.mean(0) + Qks.std(0),
-                         alpha=0.75, color=color_samples)
-        ax.fill_between(theta_deg,
-                         Qks.mean(0) - 2 * Qks.std(0),
-                         Qks.mean(0) + 2 * Qks.std(0),
-                         alpha=0.25, color=color_samples)
-
-        ax.set_xlabel(r'$\theta$ [deg]', fontsize=14)
-        ax.set_title(cfg['label'], fontsize=11)
-        ax.grid(alpha=0.15)
-        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
-
-    axes[0].set_ylabel(r'$Q(\theta)$', fontsize=16)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'bispectrum_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'5_truth_MAP_std_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
 
     # ── Figure 6: Q-matrix diagonals vs k ─────────────────────────────────
     if Q_like_D is not None and Q_prior_D is not None:
@@ -565,70 +740,101 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
         ax.legend(loc='upper right', markerscale=8)
         ax.grid(alpha=0.15)
         fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, f'Q_diagonals_{run_name}.png'), bbox_inches='tight')
+        fig.savefig(os.path.join(save_dir, f'6_Q_diagonals_{run_name}.png'), bbox_inches='tight')
+        plt.close(fig)
 
     # ── Optional: save diagnostic data files ─────────────────────────────────
     if save_csv:
-        diag_dir = os.path.join(out_dir, 'diagnostics')
+        diag_dir = os.path.join(save_dir, 'diagnostics')
         os.makedirs(diag_dir, exist_ok=True)
 
         # Spectra CSV (k-dependent quantities)
-        spectra_keys = [
-            'k', 'pk_true', 'pk_MAP', 'pk_samples_mean', 'pk_samples_std',
-            'tk_MAP', 'tk_samples_mean', 'tk_samples_std',
-            'ck_MAP', 'ck_linear', 'ck_samples_mean', 'ck_samples_std',
-        ]
-        spectra_data = np.column_stack([
-            k_pylians, pk_ic, pk_MAP, pks.mean(0), pks.std(0),
-            tk_MAP, tks.mean(0), tks.std(0),
-            xpk_MAP, xpk_linear, xpks.mean(0), xpks.std(0),
-        ])
+        x_true_flat = delta_z127.ravel().astype(np.float64)
+        if has_samples:
+            spectra_keys = [
+                'k', 'pk_true', 'pk_MAP', 'pk_samples_mean', 'pk_samples_std',
+                'tk_MAP', 'tk_samples_mean', 'tk_samples_std',
+                'ck_MAP', 'ck_linear', 'ck_samples_mean', 'ck_samples_std',
+            ]
+            spectra_data = np.column_stack([
+                k_pylians, pk_ic, pk_MAP, pks_mean, pks_std,
+                tk_MAP, tks_mean, tks_std,
+                xpk_MAP, xpk_linear, xpks_mean, xpks_std,
+            ])
+        else:
+            spectra_keys = ['k', 'pk_true', 'pk_MAP', 'tk_MAP', 'ck_MAP', 'ck_linear']
+            spectra_data = np.column_stack([
+                k_pylians, pk_ic, pk_MAP, tk_MAP, xpk_MAP, xpk_linear,
+            ])
         np.savetxt(os.path.join(diag_dir, f'spectra_{run_name}.csv'),
                    spectra_data, delimiter=',',
                    header=','.join(spectra_keys), comments='')
 
         # Scalars CSV (1-point statistics)
-        B = samples.shape[0]
-        x_true_flat = delta_z127.ravel().astype(np.float64)
-        x_samp = samples.reshape(B, -1).astype(np.float64)
-        mu_samp = x_samp.mean(axis=1)           # (B,) per-sample spatial mean
-        sig_samp = x_samp.std(axis=1, ddof=1)   # (B,) per-sample spatial std
-        g1 = skew(x_samp, axis=1, bias=False, nan_policy='omit')
-        g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
-
-        scalar_keys = [
-            'mean_true', 'mean_samples_mean', 'mean_samples_std',
-            'std_true', 'std_samples_mean', 'std_samples_std',
-            'skewness_true', 'skewness_samples_mean', 'skewness_samples_std',
-            'kurtosis_true', 'kurtosis_samples_mean', 'kurtosis_samples_std',
-        ]
-        scalar_vals = [
-            float(x_true_flat.mean()),
-            float(np.mean(mu_samp)), float(np.std(mu_samp, ddof=1)),
-            float(x_true_flat.std(ddof=1)),
-            float(np.mean(sig_samp)), float(np.std(sig_samp, ddof=1)),
-            float(skew(x_true_flat, bias=False)),
-            float(np.mean(g1)), float(np.std(g1, ddof=1)),
-            float(kurtosis(x_true_flat, fisher=True, bias=False)),
-            float(np.mean(g2)), float(np.std(g2, ddof=1)),
-        ]
+        if has_samples:
+            B = samples.shape[0]
+            x_samp = samples.reshape(B, -1).astype(np.float64)
+            mu_samp = x_samp.mean(axis=1)
+            sig_samp = x_samp.std(axis=1, ddof=1)
+            g1 = skew(x_samp, axis=1, bias=False, nan_policy='omit')
+            g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
+            scalar_keys = [
+                'mean_true', 'mean_samples_mean', 'mean_samples_std',
+                'std_true', 'std_samples_mean', 'std_samples_std',
+                'skewness_true', 'skewness_samples_mean', 'skewness_samples_std',
+                'kurtosis_true', 'kurtosis_samples_mean', 'kurtosis_samples_std',
+            ]
+            scalar_vals = [
+                float(x_true_flat.mean()),
+                float(np.mean(mu_samp)), float(np.std(mu_samp, ddof=1)),
+                float(x_true_flat.std(ddof=1)),
+                float(np.mean(sig_samp)), float(np.std(sig_samp, ddof=1)),
+                float(skew(x_true_flat, bias=False)),
+                float(np.mean(g1)), float(np.std(g1, ddof=1)),
+                float(kurtosis(x_true_flat, fisher=True, bias=False)),
+                float(np.mean(g2)), float(np.std(g2, ddof=1)),
+            ]
+            summary_lines = [
+                f'Mean (truth):               {scalar_vals[0]:.6f}\n',
+                f'Mean (samples mean):        {scalar_vals[1]:.6f} +/- {2*scalar_vals[2]:.6f}\n',
+                f'Std  (truth):               {scalar_vals[3]:.6f}\n',
+                f'Std  (samples mean):        {scalar_vals[4]:.6f} +/- {2*scalar_vals[5]:.6f}\n',
+                f'Skewness (truth):           {scalar_vals[6]:.6f}\n',
+                f'Skewness (samples mean):    {scalar_vals[7]:.6f} +/- {2*scalar_vals[8]:.6f}\n',
+                f'Kurtosis (truth):           {scalar_vals[9]:.6f}\n',
+                f'Kurtosis (samples mean):    {scalar_vals[10]:.6f} +/- {2*scalar_vals[11]:.6f}\n',
+            ]
+        else:
+            x_map_flat = z_MAP.ravel().astype(np.float64)
+            scalar_keys = [
+                'mean_true', 'mean_MAP',
+                'std_true', 'std_MAP',
+                'skewness_true', 'skewness_MAP',
+                'kurtosis_true', 'kurtosis_MAP',
+            ]
+            scalar_vals = [
+                float(x_true_flat.mean()), float(x_map_flat.mean()),
+                float(x_true_flat.std(ddof=1)), float(x_map_flat.std(ddof=1)),
+                float(skew(x_true_flat, bias=False)), float(skew(x_map_flat, bias=False)),
+                float(kurtosis(x_true_flat, fisher=True, bias=False)),
+                float(kurtosis(x_map_flat, fisher=True, bias=False)),
+            ]
+            summary_lines = [
+                f'Mean     (truth): {scalar_vals[0]:.6f}  |  MAP: {scalar_vals[1]:.6f}\n',
+                f'Std      (truth): {scalar_vals[2]:.6f}  |  MAP: {scalar_vals[3]:.6f}\n',
+                f'Skewness (truth): {scalar_vals[4]:.6f}  |  MAP: {scalar_vals[5]:.6f}\n',
+                f'Kurtosis (truth): {scalar_vals[6]:.6f}  |  MAP: {scalar_vals[7]:.6f}\n',
+            ]
         with open(os.path.join(diag_dir, f'scalars_samples_{run_name}.csv'), 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(scalar_keys)
             writer.writerow(scalar_vals)
 
-        # Human-readable txt  (uncertainties shown as ±2σ over samples)
+        # Human-readable txt
         with open(os.path.join(diag_dir, f'samples_summary_{run_name}.txt'), 'w') as f:
             f.write(f'Samples summary: {run_name}\n')
             f.write(f'{"=" * 50}\n\n')
-            f.write(f'Mean (truth):               {scalar_vals[0]:.6f}\n')
-            f.write(f'Mean (samples mean):        {scalar_vals[1]:.6f} +/- {2*scalar_vals[2]:.6f}\n')
-            f.write(f'Std  (truth):               {scalar_vals[3]:.6f}\n')
-            f.write(f'Std  (samples mean):        {scalar_vals[4]:.6f} +/- {2*scalar_vals[5]:.6f}\n')
-            f.write(f'Skewness (truth):           {scalar_vals[6]:.6f}\n')
-            f.write(f'Skewness (samples mean):    {scalar_vals[7]:.6f} +/- {2*scalar_vals[8]:.6f}\n')
-            f.write(f'Kurtosis (truth):           {scalar_vals[9]:.6f}\n')
-            f.write(f'Kurtosis (samples mean):    {scalar_vals[10]:.6f} +/- {2*scalar_vals[11]:.6f}\n')
+            f.writelines(summary_lines)
 
 
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
@@ -665,8 +871,8 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, 'calibration')
-    os.makedirs(out_dir, exist_ok=True)
+    save_dir = os.path.join(save_dir, 'calibration')
+    os.makedirs(save_dir, exist_ok=True)
     plt.rcParams['figure.facecolor'] = 'white'
 
     delta_z127 = delta_z127.astype('f')
@@ -740,7 +946,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'log_prob_histogram_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'log_prob_histogram_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 2: per-mode chi-squared vs |k| ─────────────────────────────
     chi2_true = D_k * r_true_h**2
@@ -796,7 +1002,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'chi2_per_k_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'chi2_per_k_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 3: true vs predicted Hartley modes ─────────────────────────
     # Stratified mode selection: ~50 per k-bin, ~1000 total
@@ -847,11 +1053,11 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.set_title(r'True vs predicted Hartley modes ($\pm 2\sigma$)')
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'hartley_modes_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'hartley_modes_{run_name}.png'), bbox_inches='tight')
 
     # ── Optional: save calibration summary ────────────────────────────────────
     if save_csv:
-        diag_dir = os.path.join(out_dir, 'diagnostics')
+        diag_dir = os.path.join(save_dir, 'diagnostics')
         os.makedirs(diag_dir, exist_ok=True)
 
         # CSV
@@ -1039,8 +1245,8 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     run_name : str
         Suffix appended to filenames.
     """
-    out_dir = os.path.join(save_dir, 'amortization')
-    os.makedirs(out_dir, exist_ok=True)
+    save_dir = os.path.join(save_dir, 'amortization')
+    os.makedirs(save_dir, exist_ok=True)
     plt.rcParams['figure.facecolor'] = 'white'
 
     z_MAPs = np.asarray(z_MAPs, dtype='f')
@@ -1125,7 +1331,7 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'chi2_per_k_amortized_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'chi2_per_k_amortized_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 2: chi2 z-score histogram ──────────────────────────────────
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -1152,7 +1358,7 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'chi2_zscore_hist_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'chi2_zscore_hist_{run_name}.png'), bbox_inches='tight')
 
     # ── Figure 3: PP-plot (expected coverage) ─────────────────────────────
     pit_sorted = np.sort(pit_values)
@@ -1188,11 +1394,11 @@ def plot_amortization_test(z_MAPs, z_trues, box, Q_like_D, Q_prior_D,
     ax.legend(loc='lower right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f'pp_plot_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'pp_plot_{run_name}.png'), bbox_inches='tight')
 
     # ── Optional: save diagnostic data files ─────────────────────────────────
     if save_csv:
-        diag_dir = os.path.join(out_dir, 'diagnostics')
+        diag_dir = os.path.join(save_dir, 'diagnostics')
         os.makedirs(diag_dir, exist_ok=True)
 
         # CSV
@@ -1256,4 +1462,4 @@ class MetricsCSVCallback(Callback):
         val_str   = f'{val_loss:.4f}'   if val_loss   != '' else 'n/a'
         elapsed = time.time() - self._t_start if self._t_start is not None else 0.0
         h, m_e, s = int(elapsed // 3600), int(elapsed % 3600 // 60), int(elapsed % 60)
-        print(f'Epoch {epoch:3d} | step {step:6d} | {h}h {m_e}m {s}s | train_loss {train_str} | val_loss {val_str} | lr {lr:.2e}')
+        print(f'Epoch {epoch:3d} | step {step:6d} | {h:2d}h {m_e:02d}m {s:02d}s | train_loss {train_str} | val_loss {val_str} | lr {lr:.2e}')

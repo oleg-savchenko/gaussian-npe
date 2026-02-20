@@ -62,7 +62,10 @@ H(x) = Re(FFT(x)) - Im(FFT(x)), with ortho normalization. Self-inverse. Implemen
 Mean overdensity δ̄=0 by construction on a periodic box. The posterior lives on an (N³−1)-dimensional zero-mean subspace. log_prob and calibration diagnostics exclude k=0 via `D[1:]`, `r_h[:, 1:]` indexing.
 
 ### Rescaling factor
-Fields at z=127 are rescaled by D(z=127)/D(z=0) ≈ 0.0099. The network works in rescaled (internal) space; `get_z_MAP` and `sample` multiply back by rescaling_factor for physical-space output.
+**Physical motivation:** In linear theory, the IC field and the final field differ only by the linear growth factor:
+`delta_z127 ≈ [D(z=127)/D(z=0)] * delta_z0_linear`. Since D(z=127)/D(z=0) ≈ 0.0099, `delta_z127` has ~100× smaller amplitude than `delta_z0`. Training a network to map between fields of such different amplitudes is numerically difficult. To fix this, `delta_z127` is rescaled to match the amplitude of `delta_z0` before being used as a training target.
+
+**Convention:** `rescaling_factor = D(z=127)/D(z=0) ≈ 0.0099`. In training (`forward()`), the target is `z_internal = delta_z127 / rescaling_factor ≈ 100 × delta_z127`, which has similar amplitude to `delta_z0`. The network estimator is trained to produce `z_internal`. `get_z_MAP` and `sample` multiply back by `rescaling_factor` to return the physical `delta_z127` field.
 
 ### Logit parameterization
 Filters w(k) ∈ [0,1] are parameterized as w = sigmoid(logit) where logit is unconstrained. Initialized so that sigmoid(logit) matches the default sigmoid filter: logit = (k - k_cut) / w_cut.

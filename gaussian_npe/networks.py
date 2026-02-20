@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import swyft
 from map2map.models import UNet
+from CustomUNET import UNet as CustomUNet
 from gaussian_npe.matrices import Precision_Matrix_From_Factors, Precision_Matrix_FFT, Precision_Matrix_Sum
 from gaussian_npe.utils import hartley
 
@@ -195,8 +196,8 @@ class Gaussian_NPE_WienerNet(Gaussian_NPE_Base):
         p3d = 6 * (20,)
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
         correction = self.unet(xx.unsqueeze(1)).squeeze(1)
-
-        return x_wiener + correction
+        x = x_wiener + correction
+        return x - x.mean()
 
 
 class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
@@ -238,7 +239,7 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
 
         x = x + xx_filtered
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x
+        return x - x.mean()
 
 
 class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
@@ -299,7 +300,7 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
 
         x = x + xx_filtered
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x
+        return x - x.mean()
 
 
 class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
@@ -335,7 +336,7 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
             mu = mu + correction
 
         mu = self.Q_post.G_T(self.Q_post.G(mu) * self.scale)
-        return mu
+        return mu - mu.mean()
 
 
 class Gaussian_NPE_LH(Gaussian_NPE_Network):
@@ -408,6 +409,51 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
         z = z / rescaling[:, None, None, None]
 
         return self.loss(b, z)
+
+class Gaussian_NPE_CustomUNet(Gaussian_NPE_Base):
+    """UNet-Only estimator backed by a deeper CustomUNet (4 downsampling levels).
+
+    Pure residual estimator — no sigmoid filter, no per-mode scale:
+
+        mu(x) = x + CustomUNet(x)
+
+    Uses a 4-level (num_encoding_blocks=5) CustomUNet with circular padding
+    handled internally, so no external F.pad is needed.  Configuration:
+      - num_encoding_blocks=5 → bottleneck at 8³, encoder RF ≈ 72 vox
+      - out_channels_first_layer=2 → ~380K parameters
+      - output RF ≈ 208 voxels = 1625 Mpc/h (covers fundamental mode)
+
+    The deeper bottleneck (8³ vs. map2map's 32³) allows each bottleneck
+    neuron to integrate roughly half the box volume, enabling reconstruction
+    of large-scale modes that the 2-level map2map UNet handles only via skip
+    connections.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unet = CustomUNet(
+            in_channels=1,
+            out_classes=1,
+            dimensions=3,
+            num_encoding_blocks=5,
+            out_channels_first_layer=4,
+            normalization=None,
+            pooling_type='max',
+            upsampling_type='conv',
+            preactivation=False,
+            residual=False,
+            padding=1,
+            padding_mode='circular',
+            activation='ReLU',
+            initial_dilation=None,
+            dropout=0,
+        )
+
+    def estimator(self, x):
+        xx = self.unet(x.unsqueeze(1)).squeeze(1)
+        x = x + xx
+        return x - x.mean()
+
 
 class MAP_MSE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
     """MAP estimator trained with mean-squared error loss.

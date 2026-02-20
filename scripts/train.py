@@ -31,6 +31,13 @@ Usage:
         --MAS PCS \
         --noise_seed 42 \
         --use_latex
+
+    # Resume training from a previous PL checkpoint (full optimizer + scheduler state):
+    python scripts/train.py --network WienerNet --max_epochs 100 \
+        --ckpt_path ./runs/20260220_020149_WienerNet/logs/tb_logs/version_0/checkpoints/epoch=48-step=9800.ckpt
+    # Note: --max_epochs is the *total* epoch count, not additional epochs.
+    # The checkpoint records the epoch it was saved at, so training continues from there.
+    # All network architecture args must match the original run exactly.
 """
 
 import os
@@ -56,6 +63,8 @@ from gaussian_npe import (
     Gaussian_NPE_SmoothFilter,
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
+    Gaussian_NPE_CustomUNet,
+    MAP_MSE_Network,
 )
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
@@ -65,6 +74,8 @@ NETWORK_CLASSES = {
     'SmoothFilter': Gaussian_NPE_SmoothFilter,
     'Iterative': Gaussian_NPE_Iterative,
     'LH': Gaussian_NPE_LH,
+    'MAP_MSE': MAP_MSE_Network,
+    'CustomUNet': Gaussian_NPE_CustomUNet,
 }
 
 from pytorch_lightning.callbacks import LearningRateMonitor
@@ -197,6 +208,13 @@ def parse_args():
         '--use_latex', action='store_true', default=False,
         help='Use LaTeX rendering and scienceplots style for all plots',
     )
+    parser.add_argument(
+        '--ckpt_path', type=str, default=None,
+        help='Path to a PyTorch Lightning .ckpt file to resume training from. '
+             'Restores full optimizer and scheduler state. '
+             '--max_epochs is the total epoch count (not additional epochs). '
+             'All network architecture arguments must match the original run.',
+    )
 
     return parser.parse_args()
 
@@ -241,7 +259,7 @@ def main():
     # ── Save config ──────────────────────────────────────────────────────
     # k_cut and w_cut are omitted for networks that don't use them.
     _filter_keys = set()
-    if args.network in ('UNet_Only', 'WienerNet', 'Iterative'):
+    if args.network in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet'):
         _filter_keys = {'k_cut', 'w_cut'}
     config = {
         'timestamp': timestamp,
@@ -280,10 +298,14 @@ def main():
         lr_scheduler_patience=args.lr_scheduler_patience,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative'):
+    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet'):
         net_kwargs['k_cut'] = args.k_cut
         net_kwargs['w_cut'] = args.w_cut
-    network = NetworkClass(box, prior, **net_kwargs)
+    # MAP_MSE_Network takes no prior argument
+    if args.network == 'MAP_MSE':
+        network = NetworkClass(box, **net_kwargs)
+    else:
+        network = NetworkClass(box, prior, **net_kwargs)
     network.float().to(device)
 
     # ── Trainer ──────────────────────────────────────────────────────────
@@ -312,10 +334,12 @@ def main():
         print(f'Using {n_train} train + {n_val} val = {n_use} of {len(store)} simulations')
 
     # ── Train ────────────────────────────────────────────────────────────
-    print(f'\nStarting training for up to {args.max_epochs} epochs...')
+    if args.ckpt_path:
+        print(f'\nResuming from checkpoint: {args.ckpt_path}')
+    print(f'Starting training for up to {args.max_epochs} epochs...')
     t_start = time.time()
 
-    trainer.fit(network, dm)
+    trainer.fit(network, dm, ckpt_path=args.ckpt_path)
 
     t_train = time.time() - t_start
     h, m, s = int(t_train // 3600), int(t_train % 3600 // 60), int(t_train % 60)
@@ -333,7 +357,7 @@ def main():
     os.makedirs(plots_dir, exist_ok=True)
     utils.plot_training_curves(
         metrics_file=metrics_csv_path,
-        save_path=os.path.join(plots_dir, f'training_curves_{run_label}.png'),
+        save_path=os.path.join(plots_dir, f'0_training_curves_{run_label}.png'),
         title=f'{run_label} — trained in {h}h {m}m {s}s',
         config=config,
     )
@@ -345,8 +369,12 @@ def main():
     print(f'Model saved to {model_path}')
 
     # ── Generate samples & plot ──────────────────────────────────────────
-    print(f'\nGenerating {args.num_samples} posterior samples '
-          f'from target {args.target_path}...')
+    has_posterior = hasattr(network, 'sample')
+    if has_posterior:
+        print(f'\nGenerating {args.num_samples} posterior samples '
+              f'from target {args.target_path}...')
+    else:
+        print(f'\nComputing MAP estimate from target {args.target_path}...')
     network.to(device).eval()
 
     sample0 = torch.load(args.target_path, weights_only=False)
@@ -359,21 +387,24 @@ def main():
 
     with torch.no_grad():
         z_MAP = network.get_z_MAP(torch.from_numpy(delta_obs).to(device).float())
-        samples = network.sample(args.num_samples, z_MAP=z_MAP)
+        samples = network.sample(args.num_samples, z_MAP=z_MAP) if has_posterior else None
 
     z_MAP_np = z_MAP.cpu().numpy()
+    samples_np = np.array(samples) / rescaling_factor if samples is not None else None
+    Q_like_D = network.Q_like.D.detach().cpu().numpy() if hasattr(network, 'Q_like') else None
+    Q_prior_D = network.Q_prior.D.detach().cpu().numpy() if hasattr(network, 'Q_prior') else None
 
     print('Plotting analysis...')
     utils.plot_samples_analysis(
         delta_z127=delta_z127 / rescaling_factor,
         delta_z0=delta_z0,
-        samples=np.array(samples) / rescaling_factor,
+        samples=samples_np,
         z_MAP=z_MAP_np / rescaling_factor,
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,
-        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
-        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+        Q_like_D=Q_like_D,
+        Q_prior_D=Q_prior_D,
         save_dir=plots_dir,
         run_name=run_label,
         save_csv=True,
@@ -381,20 +412,21 @@ def main():
     print(f'Plots saved to {plots_dir}')
     plt.close('all')
 
-    print('Running calibration diagnostics...')
-    utils.plot_calibration_diagnostics(
-        delta_z127=delta_z127 / rescaling_factor,
-        z_MAP=z_MAP_np / rescaling_factor,
-        samples=np.array(samples) / rescaling_factor,
-        box=box,
-        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
-        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
-        save_dir=plots_dir,
-        run_name=run_label,
-        save_csv=True,
-    )
-    print(f'Calibration diagnostics saved to {os.path.join(plots_dir, "calibration")}')
-    plt.close('all')
+    if has_posterior:
+        print('Running calibration diagnostics...')
+        utils.plot_calibration_diagnostics(
+            delta_z127=delta_z127 / rescaling_factor,
+            z_MAP=z_MAP_np / rescaling_factor,
+            samples=samples_np,
+            box=box,
+            Q_like_D=Q_like_D,
+            Q_prior_D=Q_prior_D,
+            save_dir=plots_dir,
+            run_name=run_label,
+            save_csv=True,
+        )
+        print(f'Calibration diagnostics saved to {os.path.join(plots_dir, "calibration")}')
+        plt.close('all')
 
     print(f'\nRun complete. All outputs saved to {output_dir}')
 

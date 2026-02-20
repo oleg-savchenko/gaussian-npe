@@ -46,6 +46,7 @@ from gaussian_npe import (
     Gaussian_NPE_SmoothFilter,
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
+    Gaussian_NPE_CustomUNet,
 )
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
@@ -55,6 +56,7 @@ NETWORK_CLASSES = {
     'SmoothFilter': Gaussian_NPE_SmoothFilter,
     'Iterative': Gaussian_NPE_Iterative,
     'LH': Gaussian_NPE_LH,
+    'CustomUNet': Gaussian_NPE_CustomUNet,
 }
 
 
@@ -202,7 +204,7 @@ def main():
         rescaling_factor=rescaling_factor,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative'):
+    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
         net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
     network = NetworkClass(box, prior, **net_kwargs)
