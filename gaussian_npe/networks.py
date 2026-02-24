@@ -3,7 +3,12 @@ import torch.nn.functional as F
 import swyft
 from map2map.models import UNet
 from CustomUNET import UNet as CustomUNet
-from gaussian_npe.matrices import Precision_Matrix_From_Factors, Precision_Matrix_FFT, Precision_Matrix_Sum
+from gaussian_npe.matrices import (
+    Precision_Matrix_From_Factors,
+    Precision_Matrix_FFT,
+    Precision_Matrix_Sum,
+    Precision_Matrix_IsotropicNodes,
+)
 from gaussian_npe.utils import hartley
 
 
@@ -31,6 +36,34 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         self.Q_prior = Precision_Matrix_From_Factors(*prior)
         self.Q_like = Precision_Matrix_FFT(self.N)
         self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
+
+    def configure_optimizers(self):
+        # Per-mode Hartley-space params: Q_like diagonal + any subclass filter/scale params.
+        # These must NOT be weight-decayed — their optimal values are far from zero.
+        per_mode = list(self.Q_like.parameters())
+        for attr in ('scale', 'filter_logit', 'filter_logit_nodes'):
+            if hasattr(self, attr):
+                per_mode.append(getattr(self, attr))
+
+        per_mode_ids = {id(p) for p in per_mode}
+        other_params = [p for p in self.parameters() if id(p) not in per_mode_ids]
+
+        optimizer = torch.optim.AdamW(
+            [
+                {'params': other_params, 'weight_decay': 1e-4},
+                {'params': per_mode,     'weight_decay': 0.0},
+            ],
+            lr=self.learning_rate,
+        )
+        lr_scheduler = {
+            'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                factor=getattr(self, 'lr_scheduler_factor', 0.1),
+                patience=self.lr_scheduler_patience,
+            ),
+            'monitor': 'val_loss',
+        }
+        return dict(optimizer=optimizer, lr_scheduler=lr_scheduler)
 
     def estimator(self, x):
         raise NotImplementedError
@@ -147,7 +180,7 @@ class Gaussian_NPE_Network(Gaussian_NPE_Base):
 
         x = x + self.box.sigmoid_filter(xx, self.k_cut, self.w_cut)
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x - x.mean()  # enforce zero-mean overdensity
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)  # enforce zero-mean overdensity
 
 
 class Gaussian_NPE_UNet_Only(Gaussian_NPE_Base):
@@ -167,7 +200,7 @@ class Gaussian_NPE_UNet_Only(Gaussian_NPE_Base):
         p3d = 6 * (20,)
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
         x = x + self.unet(xx.unsqueeze(1)).squeeze(1)
-        return x - x.mean()
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class Gaussian_NPE_WienerNet(Gaussian_NPE_Base):
@@ -197,7 +230,7 @@ class Gaussian_NPE_WienerNet(Gaussian_NPE_Base):
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
         correction = self.unet(xx.unsqueeze(1)).squeeze(1)
         x = x_wiener + correction
-        return x - x.mean()
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
@@ -239,7 +272,7 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
 
         x = x + xx_filtered
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x - x.mean()
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
@@ -278,12 +311,10 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
         frac = ((log_k - log_k_nodes[idx - 1])
                 / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
 
-        # Each mode gets weight (1-frac) on node[idx-1] and frac on node[idx]
-        W = torch.zeros(self.N**3, n_filter_nodes, device=log_k.device)
-        arange = torch.arange(self.N**3, device=log_k.device)
-        W[arange, idx - 1] = 1 - frac
-        W[arange, idx] = frac
-        self.register_buffer('_interp_W', W)
+        # Each mode interpolates between node[idx-1] and node[idx]
+        self.register_buffer('_left_idx',  idx - 1)
+        self.register_buffer('_right_idx', idx)
+        self.register_buffer('_frac',      frac)
 
     def estimator(self, x):
         p3d = 6 * (20,)
@@ -291,7 +322,10 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
         xx = self.unet(xx.unsqueeze(1)).squeeze(1)
 
         # Smooth learnable filter (interpolated from ~20 k-nodes)
-        w = torch.sigmoid(self._interp_W @ self.filter_logit_nodes)     # (N³,)
+        w = torch.sigmoid(
+            (1 - self._frac) * self.filter_logit_nodes[self._left_idx]
+            +      self._frac  * self.filter_logit_nodes[self._right_idx]
+        )
         xx_h = hartley(xx, dim=self.box.hartley_dim).flatten(-3, -1)   # (B, N³)
         xx_filtered = hartley(
             (w * xx_h).unflatten(-1, self.box.shape),
@@ -300,7 +334,7 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
 
         x = x + xx_filtered
         x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
-        return x - x.mean()
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
@@ -336,7 +370,7 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
             mu = mu + correction
 
         mu = self.Q_post.G_T(self.Q_post.G(mu) * self.scale)
-        return mu - mu.mean()
+        return mu - mu.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class Gaussian_NPE_LH(Gaussian_NPE_Network):
@@ -452,7 +486,38 @@ class Gaussian_NPE_CustomUNet(Gaussian_NPE_Base):
     def estimator(self, x):
         xx = self.unet(x.unsqueeze(1)).squeeze(1)
         x = x + xx
-        return x - x.mean()
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
+
+
+class Gaussian_NPE_IsotropicD(Gaussian_NPE_Base):
+    """Isotropic likelihood precision parameterized by k-node amplitudes.
+
+    Replaces the full N³-element Precision_Matrix_FFT with a
+    Precision_Matrix_IsotropicNodes that models D_like as a smooth function
+    of |k| using n_nodes learnable log-amplitude values (default 32):
+
+        D_like(|k|) = exp(interp(log|k|; log_D_nodes))
+
+    Estimator is a plain UNet residual (no filter, no scale):
+
+        mu(x) = x + UNet(x)
+
+    Motivation: D_like(k) is empirically ~isotropic, so ~32 parameters
+    capture the full spectral shape without N³ = 2M free values.
+    """
+
+    def __init__(self, box, *args, n_nodes=32, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        self.Q_like = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes,
+        )
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        x = x + self.unet(xx.unsqueeze(1)).squeeze(1)
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
 class MAP_MSE_Network(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):

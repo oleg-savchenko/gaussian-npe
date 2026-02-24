@@ -47,6 +47,7 @@ from gaussian_npe import (
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
     Gaussian_NPE_CustomUNet,
+    Gaussian_NPE_IsotropicD,
 )
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
@@ -57,6 +58,7 @@ NETWORK_CLASSES = {
     'Iterative': Gaussian_NPE_Iterative,
     'LH': Gaussian_NPE_LH,
     'CustomUNet': Gaussian_NPE_CustomUNet,
+    'IsotropicD': Gaussian_NPE_IsotropicD,
 }
 
 
@@ -204,7 +206,7 @@ def main():
         rescaling_factor=rescaling_factor,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet'):
+    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet', 'IsotropicD'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
         net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
     network = NetworkClass(box, prior, **net_kwargs)

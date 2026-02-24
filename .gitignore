@@ -23,6 +23,9 @@ Quijote_target/
 # Legacy scripts
 scripts/os250301-Quijote_module_training.py
 
+# Text files
+text_files/
+
 # Python
 __pycache__/
 *.pyc

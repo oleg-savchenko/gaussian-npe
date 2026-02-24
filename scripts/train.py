@@ -26,7 +26,7 @@ Usage:
         --val_fraction 0.2 \
         --num_workers 16 \
         --precision 32 \
-        --target_path ./Quijote_target/Quijote_sample0.pt \
+        --target_path ./Quijote_target/Quijote_fiducial_res128_deconv_MAK.pt \
         --num_samples 100 \
         --MAS PCS \
         --noise_seed 42 \
@@ -64,6 +64,7 @@ from gaussian_npe import (
     Gaussian_NPE_Iterative,
     Gaussian_NPE_LH,
     Gaussian_NPE_CustomUNet,
+    Gaussian_NPE_IsotropicD,
     MAP_MSE_Network,
 )
 NETWORK_CLASSES = {
@@ -76,6 +77,7 @@ NETWORK_CLASSES = {
     'LH': Gaussian_NPE_LH,
     'MAP_MSE': MAP_MSE_Network,
     'CustomUNet': Gaussian_NPE_CustomUNet,
+    'IsotropicD': Gaussian_NPE_IsotropicD,
 }
 
 from pytorch_lightning.callbacks import LearningRateMonitor
@@ -259,7 +261,7 @@ def main():
     # ── Save config ──────────────────────────────────────────────────────
     # k_cut and w_cut are omitted for networks that don't use them.
     _filter_keys = set()
-    if args.network in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet'):
+    if args.network in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD'):
         _filter_keys = {'k_cut', 'w_cut'}
     config = {
         'timestamp': timestamp,
@@ -298,7 +300,7 @@ def main():
         lr_scheduler_patience=args.lr_scheduler_patience,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet'):
+    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD'):
         net_kwargs['k_cut'] = args.k_cut
         net_kwargs['w_cut'] = args.w_cut
     # MAP_MSE_Network takes no prior argument

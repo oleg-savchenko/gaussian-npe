@@ -34,11 +34,11 @@ import argparse
 # LH (Latin Hypercube) is excluded — it targets a different dataset.
 NETWORKS = [
     'default',
-    # 'UNet_Only',
-    # 'WienerNet',
-    # 'LearnableFilter',
-    # 'SmoothFilter',
-    # 'Iterative',
+    'UNet_Only',
+    'WienerNet',
+    'LearnableFilter',
+    'SmoothFilter',
+    'Iterative',
 ]
 
 # ── SLURM header template ────────────────────────────────────────────

@@ -70,12 +70,26 @@ class Precision_Matrix_FFT(GDG_Factor_Matrix):
     Q = F_T * D * F
 
     Input and output shapes are (B, N, N, N), where shape = (N, N, N).
+
+    Two parameterizations of the positive diagonal D are supported:
+      'exp'  (default): D = exp(log_D),  log_D initialized to 0  → D=1.
+                        Gradient of the log-det term is exactly constant (=0.5),
+                        since log(exp(u)) = u.  Natural for precision parameters.
+      'sqrt':           D = sqrt_D**2,   sqrt_D initialized to 1 → D=1.
+                        Legacy option; suffers from sign symmetry and non-uniform
+                        log-det gradients.
     """
-    def __init__(self, N):
+    def __init__(self, N, parameterization='exp'):
         super().__init__()
         self.N = N
         self.shape = 3 * (self.N,)
-        self.sqrt_D = torch.nn.Parameter(torch.ones(self.N**3))
+        self.parameterization = parameterization
+        if parameterization == 'exp':
+            self.log_D = torch.nn.Parameter(torch.zeros(self.N**3))
+        elif parameterization == 'sqrt':
+            self.sqrt_D = torch.nn.Parameter(torch.ones(self.N**3))
+        else:
+            raise ValueError(f"Unknown parameterization '{parameterization}'. Choose 'exp' or 'sqrt'.")
 
     def G(self, x):
         x = hartley(x).flatten(-len(self.shape), -1)
@@ -83,11 +97,70 @@ class Precision_Matrix_FFT(GDG_Factor_Matrix):
 
     @property
     def D(self):
+        if self.parameterization == 'exp':
+            return self.log_D.exp()
         return self.sqrt_D**2
 
     def G_T(self, x):
         x = hartley(x.unflatten(-1, self.shape))
         return x
+
+class Precision_Matrix_IsotropicNodes(GDG_Factor_Matrix):
+    """Isotropic D_like(k) parameterized via learnable log-amplitude nodes.
+
+    D(|k|) = exp(linear interpolation of log_D_nodes at log-spaced k-nodes)
+
+    Only n_nodes parameters (default 32) instead of N³.  Three (N³,) buffers
+    hold precomputed interpolation indices and fractions (~8 MB total vs.
+    ~8 MB for a full N³ parameter tensor — but critically, the spectral shape
+    is smooth and isotropic by construction).
+
+    G / G_T are identical to Precision_Matrix_FFT (Hartley transform).
+    """
+
+    def __init__(self, N, k_flat, n_nodes=32):
+        """
+        Args:
+            N      : grid side length (k grid is N³)
+            k_flat : (N³,) tensor of |k| values (box.k.flatten())
+            n_nodes: number of learnable log-D nodes (default 32)
+        """
+        super().__init__()
+        self.N = N
+        self.shape = 3 * (N,)
+
+        k_F  = float(k_flat[k_flat > 0].min())
+        k_Nq = float(k_flat.max())
+
+        log_k_nodes = torch.linspace(
+            float(torch.tensor(k_F).log()),
+            float(torch.tensor(k_Nq).log()),
+            n_nodes,
+        )
+        log_k = torch.log(k_flat.clamp(min=k_F))
+        log_k_nodes = log_k_nodes.to(log_k.device)
+
+        idx  = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_nodes - 1)
+        frac = ((log_k - log_k_nodes[idx - 1])
+                / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
+
+        self.register_buffer('_left_idx',  idx - 1)
+        self.register_buffer('_right_idx', idx)
+        self.register_buffer('_frac',      frac)
+        self.log_D_nodes = torch.nn.Parameter(torch.zeros(n_nodes))
+
+    def G(self, x):
+        return hartley(x).flatten(-3, -1)
+
+    @property
+    def D(self):
+        log_D = ((1 - self._frac) * self.log_D_nodes[self._left_idx]
+                 +      self._frac  * self.log_D_nodes[self._right_idx])
+        return log_D.exp()
+
+    def G_T(self, x):
+        return hartley(x.unflatten(-1, self.shape))
+
 
 class Precision_Matrix_Sum(GDG_Factor_Matrix):
     """Sum of two precision matrices diagonal in the same basis.
