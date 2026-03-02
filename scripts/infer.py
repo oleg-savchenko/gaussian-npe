@@ -24,11 +24,15 @@ Amortization test (run on many held-out observations):
         --target_dir ./Quijote_target \
         --noise_seed 42 \
         --use_latex
+
+Isotropic default (sigmoid filter + isotropic scale + isotropic Q_like):
+    python scripts/infer.py --model_dir ./runs/20260216_153000_iso_default
+
+Poisson noise model (n_bar/galaxy_bias read from saved training config):
+    python scripts/infer.py --model_dir ./runs/20260216_153000_poisson_lrg
 """
 
 import os
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import argparse
 import json
@@ -48,6 +52,9 @@ from gaussian_npe import (
     Gaussian_NPE_LH,
     Gaussian_NPE_CustomUNet,
     Gaussian_NPE_IsotropicD,
+    Gaussian_NPE_WienerIsotropicD,
+    Gaussian_NPE_Default_IsotropicD,
+    Gaussian_NPE_Poisson,
 )
 NETWORK_CLASSES = {
     'default': Gaussian_NPE_Network,
@@ -59,6 +66,9 @@ NETWORK_CLASSES = {
     'LH': Gaussian_NPE_LH,
     'CustomUNet': Gaussian_NPE_CustomUNet,
     'IsotropicD': Gaussian_NPE_IsotropicD,
+    'WienerIsotropicD': Gaussian_NPE_WienerIsotropicD,
+    'default_IsotropicD': Gaussian_NPE_Default_IsotropicD,
+    'Poisson': Gaussian_NPE_Poisson,
 }
 
 
@@ -193,7 +203,7 @@ def main():
 
     prior = box.get_prior_Q_factors(
         lambda k: torch.tensor(
-            utils.get_pk_class(COSMO_PARAMS, 0, np.array(k)), device=device,
+            utils.get_pk_class(COSMO_PARAMS, 0, k.detach().cpu().numpy()), device=device,
         )
     )
 
@@ -201,15 +211,24 @@ def main():
     network_name = train_config.get('network', 'default')
     NetworkClass = NETWORK_CLASSES[network_name]
     print(f'Network: {NetworkClass.__name__}')
+    n_bar       = train_config.get('n_bar', 5e-4)
+    galaxy_bias = train_config.get('galaxy_bias', 1.5)
+
     net_kwargs = dict(
         sigma_noise=train_config.get('sigma_noise', 0.0),
         rescaling_factor=rescaling_factor,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet', 'IsotropicD'):
+    if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet', 'IsotropicD', 'WienerIsotropicD', 'Poisson'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
         net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
-    network = NetworkClass(box, prior, **net_kwargs)
+
+    if network_name == 'Poisson':
+        network = NetworkClass(box, prior,
+                               n_bar=n_bar, galaxy_bias=galaxy_bias,
+                               rescaling_factor=rescaling_factor)
+    else:
+        network = NetworkClass(box, prior, **net_kwargs)
     network.float().to(device)
 
     model_path = os.path.join(args.model_dir, 'model.pt')
@@ -243,8 +262,16 @@ def main():
     with open(os.path.join(output_dir, 'infer_config.json'), 'w') as f:
         json.dump(infer_config, f, indent=2)
     rng = np.random.default_rng(args.noise_seed)
-    delta_obs = delta_z0 + rng.standard_normal(delta_z0.shape).astype('f') * sigma_noise
-    print(f'Added observational noise (sigma={sigma_noise}, seed={args.noise_seed})')
+    if network_name == 'Poisson':
+        V_voxel   = (box.box_size / box.N) ** 3
+        N_bar     = n_bar * V_voxel
+        N_mean    = (N_bar * (1 + galaxy_bias * delta_z0)).clip(min=0)
+        delta_obs = (rng.poisson(N_mean).astype('f') / (N_bar * galaxy_bias)
+                     - 1.0 / galaxy_bias)
+        print(f'Applied Poisson noise (n_bar={n_bar}, galaxy_bias={galaxy_bias}, seed={args.noise_seed})')
+    else:
+        delta_obs = delta_z0 + rng.standard_normal(delta_z0.shape).astype('f') * sigma_noise
+        print(f'Added observational noise (sigma={sigma_noise}, seed={args.noise_seed})')
 
     # ── Generate MAP & posterior samples ──────────────────────────────────
     print(f'Generating {args.num_samples} posterior samples...')
@@ -253,6 +280,22 @@ def main():
         samples = network.sample(args.num_samples, z_MAP=z_MAP)
 
     z_MAP_np = z_MAP.cpu().numpy()
+
+    # Networks with a Q_prior/Q_like split expose both attributes.
+    # LH deletes them and exposes only Q_post (a single learned precision matrix).
+    with torch.no_grad():
+        if hasattr(network, 'Q_like') and hasattr(network, 'Q_prior'):
+            Q_like_D  = network.Q_like.D.detach().cpu().numpy()
+            Q_prior_D = network.Q_prior.D.detach().cpu().numpy()
+        else:
+            Q_like_D  = network.Q_post.D.detach().cpu().numpy()
+            Q_prior_D = np.zeros_like(Q_like_D)
+
+    Q_like_obj = getattr(network, 'Q_like', None) or network.Q_post
+    Q_like_k_nodes = (Q_like_obj._log_k_nodes.exp().detach().cpu().numpy()
+                      if hasattr(Q_like_obj, '_log_k_nodes') else None)
+    Q_like_D_nodes = (Q_like_obj.log_D_nodes.exp().detach().cpu().numpy()
+                      if hasattr(Q_like_obj, 'log_D_nodes') else None)
 
     # ── Plot ─────────────────────────────────────────────────────────────
     print('Plotting analysis...')
@@ -266,8 +309,10 @@ def main():
         box=box,
         cosmo_params=COSMO_PARAMS.copy(),
         MAS=args.MAS,
-        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
-        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+        Q_like_D=Q_like_D,
+        Q_prior_D=Q_prior_D,
+        Q_like_k_nodes=Q_like_k_nodes,
+        Q_like_D_nodes=Q_like_D_nodes,
         save_dir=plots_dir,
         run_name=run_label,
         save_csv=True,
@@ -281,8 +326,8 @@ def main():
         z_MAP=z_MAP_np / rescaling_factor,
         samples=np.array(samples) / rescaling_factor,
         box=box,
-        Q_like_D=network.Q_like.D.detach().cpu().numpy(),
-        Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+        Q_like_D=Q_like_D,
+        Q_prior_D=Q_prior_D,
         save_dir=plots_dir,
         run_name=run_label,
         save_csv=True,
@@ -296,37 +341,47 @@ def main():
             os.path.join(args.target_dir, f)
             for f in os.listdir(args.target_dir) if f.endswith('.pt')
         ])
-        print(f'\nRunning amortization test on {len(pt_files)} observations '
-              f'from {args.target_dir}...')
+        if not pt_files:
+            print(f'\nWarning: no .pt files found in {args.target_dir}; '
+                  'skipping amortization test.')
+        else:
+            print(f'\nRunning amortization test on {len(pt_files)} observations '
+                  f'from {args.target_dir}...')
 
-        rng_amort = np.random.default_rng(args.noise_seed)
-        z_MAPs, z_trues = [], []
-        with torch.no_grad():
-            for i, pt_file in enumerate(pt_files):
-                sample_i = torch.load(pt_file, weights_only=False)
-                dz0_i = sample_i['delta_z0'].astype('f')
-                dz127_i = sample_i['delta_z127'].astype('f')
-                obs_i = dz0_i + rng_amort.standard_normal(dz0_i.shape).astype('f') * sigma_noise
-                z_MAP_i = network.get_z_MAP(
-                    torch.from_numpy(obs_i).to(device).float()
-                )
-                z_MAPs.append(z_MAP_i.cpu().numpy() / rescaling_factor)
-                z_trues.append(dz127_i / rescaling_factor)
-                if (i + 1) % 10 == 0 or i + 1 == len(pt_files):
-                    print(f'  [{i + 1}/{len(pt_files)}]')
+            rng_amort = np.random.default_rng(args.noise_seed)
+            z_MAPs, z_trues = [], []
+            with torch.no_grad():
+                for i, pt_file in enumerate(pt_files):
+                    sample_i = torch.load(pt_file, weights_only=False)
+                    dz0_i = sample_i['delta_z0'].astype('f')
+                    dz127_i = sample_i['delta_z127'].astype('f')
+                    if network_name == 'Poisson':
+                        N_bar_amort = n_bar * (box.box_size / box.N) ** 3
+                        N_mean_i  = (N_bar_amort * (1 + galaxy_bias * dz0_i)).clip(min=0)
+                        obs_i = (rng_amort.poisson(N_mean_i).astype('f') / (N_bar_amort * galaxy_bias)
+                                 - 1.0 / galaxy_bias)
+                    else:
+                        obs_i = dz0_i + rng_amort.standard_normal(dz0_i.shape).astype('f') * sigma_noise
+                    z_MAP_i = network.get_z_MAP(
+                        torch.from_numpy(obs_i).to(device).float()
+                    )
+                    z_MAPs.append(z_MAP_i.cpu().numpy() / rescaling_factor)
+                    z_trues.append(dz127_i / rescaling_factor)
+                    if (i + 1) % 10 == 0 or i + 1 == len(pt_files):
+                        print(f'  [{i + 1}/{len(pt_files)}]')
 
-        utils.plot_amortization_test(
-            z_MAPs=np.array(z_MAPs),
-            z_trues=np.array(z_trues),
-            box=box,
-            Q_like_D=network.Q_like.D.detach().cpu().numpy(),
-            Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
-            save_dir=plots_dir,
-            run_name=run_label,
-            save_csv=True,
-        )
-        print(f'Amortization test saved to {os.path.join(plots_dir, "amortization")}')
-        plt.close('all')
+            utils.plot_amortization_test(
+                z_MAPs=np.array(z_MAPs),
+                z_trues=np.array(z_trues),
+                box=box,
+                Q_like_D=network.Q_like.D.detach().cpu().numpy(),
+                Q_prior_D=network.Q_prior.D.detach().cpu().numpy(),
+                save_dir=plots_dir,
+                run_name=run_label,
+                save_csv=True,
+            )
+            print(f'Amortization test saved to {os.path.join(plots_dir, "amortization")}')
+            plt.close('all')
 
     print(f'\nInference complete. All outputs saved to {output_dir}')
 

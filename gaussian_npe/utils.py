@@ -13,6 +13,10 @@ from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter1d  # just for smoothing the histogram curves
 from pytorch_lightning.callbacks import Callback
 
+_QUIJOTE_FIDUCIAL_COSMO = {
+    'h': 0.6711, 'Omega_b': 0.049, 'Omega_cdm': 0.2685,
+    'n_s': 0.9624, 'non linear': 'halofit', 'sigma8': 0.834,
+}
 
 def configure_matplotlib_style(use_latex=False):
     """Set global matplotlib style. Call once at the start of a script before any plotting.
@@ -55,18 +59,27 @@ def get_pk_class(cosmo_params, z, k, non_lin = False):
     The returned power spectrum is in units of (Mpc/h)³.
     """
     h = cosmo_params['h']
-    cosmo_params.update({
+    params = dict(cosmo_params)   # don't mutate the caller's dict
+    params.update({
         'output': 'mPk',
         'P_k_max_h/Mpc': np.max(k),
         'z_max_pk': z,
+        # Fix YHe explicitly to bypass CLASS's BBN interpolation table,
+        # which only covers omega_b up to ~0.04.  Some LH cosmologies
+        # (high Omega_b × h²) exceed this limit and trigger a CosmoSevereError.
+        'YHe': 0.2454,
     })
-    cosmo = Class() 
-    cosmo.set(cosmo_params)
+    cosmo = Class()
+    cosmo.set(params)
     cosmo.compute()
-    if non_lin:
-        pk_class = h**3*np.array([cosmo.pk(h*ki, z) for ki in k])
-    else:
-        pk_class = h**3*np.array([cosmo.pk_lin(h*ki, z) for ki in k])
+    try:
+        if non_lin:
+            pk_class = h**3*np.array([cosmo.pk(h*ki, z) for ki in k])
+        else:
+            pk_class = h**3*np.array([cosmo.pk_lin(h*ki, z) for ki in k])
+    finally:
+        cosmo.struct_cleanup()
+        cosmo.empty()
     return pk_class
 
 def growth_D_approx(cosmo_params, z):
@@ -157,17 +170,17 @@ class Power_Spectrum_Sampler:
         x = UT(r * D**-0.5)
         return x
 
-    def top_hat_filter(self, x, k_min = None, k_max = None):
+    def top_hat_filter(self, x, k_min=None, k_max=None):
         """Sharp cutoff filter in Fourier space.
         """
-        if k_max == None:
+        if k_max is None:
             mask = (self.k <= k_min)
-        elif k_min == None:
+        elif k_min is None:
             mask = (self.k >= k_max)
         else:
-            mask = ((self.k <= k_min) & (self.k >= k_max))
-        mask.to(self.device)
-        return hartley(mask * hartley(x, dim = self.hartley_dim), dim = self.hartley_dim)
+            mask = ((self.k >= k_min) & (self.k <= k_max))
+        mask = mask.to(self.device)
+        return hartley(mask * hartley(x, dim=self.hartley_dim), dim=self.hartley_dim)
     
     def sigmoid_filter(self, x, k_cut, w_cut):
         """Sigmoidal high-pass filter in Fourier space centred at k_cut with width w_cut.
@@ -176,7 +189,7 @@ class Power_Spectrum_Sampler:
         mask.to(self.device)
         return hartley(mask * hartley(x, dim = self.hartley_dim), dim = self.hartley_dim)
     
-    def get_pk_pylians(self, delta, MAS = 'PCS'):
+    def get_pk_pylians(self, delta, MAS = None):
         """
         Compute the power spectrum of an input field using the Pylians library.
         """
@@ -186,6 +199,44 @@ class Power_Spectrum_Sampler:
         k_pylians = Pk.k3D    # 3D P(k)
         pk_pylians = Pk.Pk[:, 0]    # Monopole
         return k_pylians, pk_pylians
+    
+# ── MAS deconvolution ─────────────────────────────────────────────────────────
+
+_MAS_ORDER = {'NGP': 1, 'CIC': 2, 'TSC': 3, 'PCS': 4}
+
+def deconvolve_mas(delta, mas='PCS'):
+    """Deconvolve the mass-assignment kernel from a 3D density field.
+
+    The window function for a MAS of order p in 1D Fourier space is:
+
+        W(n) = sinc^p(n / N),   sinc(x) = sin(πx) / (πx)
+
+    where n/N = np.fft.fftfreq(N).  In 3D the kernel is separable:
+    W_3D = W(nx) · W(ny) · W(nz).  W(0) = 1, so the DC mode is unchanged
+    and there is no division-by-zero.
+
+    Supported MAS schemes (string or integer order):
+        'NGP' / 1,  'CIC' / 2,  'TSC' / 3,  'PCS' / 4
+
+    Parameters
+    ----------
+    delta : (N, N, N) float32 ndarray
+        Density field assigned to the mesh with the specified MAS.
+    mas : str or int
+        Mass-assignment scheme name or polynomial order.
+
+    Returns
+    -------
+    (N, N, N) float32 ndarray — field with the MAS kernel removed.
+    """
+    order = _MAS_ORDER[mas.upper()] if isinstance(mas, str) else int(mas)
+    N    = delta.shape[0]
+    Wxy  = np.sinc(np.fft.fftfreq(N))  ** order   # shape (N,)
+    Wz   = np.sinc(np.fft.rfftfreq(N)) ** order   # shape (N//2+1,)
+    W    = Wxy[:, None, None] * Wxy[None, :, None] * Wz[None, None, :]
+    delta_k   = np.fft.rfftn(delta)
+    delta_k  /= W
+    return np.fft.irfftn(delta_k, s=(N, N, N)).astype(np.float32)
 
 
 class LinearWienerFilter:
@@ -427,6 +478,7 @@ def fit_D_spectrum(k_flat, D_like, D_prior=None, n_bins=40, k_min=None, k_max=No
 def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                           cosmo_params=None, MAS=None,
                           Q_like_D=None, Q_prior_D=None,
+                          Q_like_k_nodes=None, Q_like_D_nodes=None,
                           save_dir='./plots', run_name='',
                           save_csv=False, n_workers=None):
     """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
@@ -675,7 +727,7 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
     for row, (data, label, (lo, hi)) in enumerate(zip(row_data, row_labels, row_vlims)):
         for col, s in enumerate(slices):
             im = axes[row, col].imshow(data[s], origin='lower', cmap='seismic', vmin=lo, vmax=hi)
-            axes[row, col].set_title(f'{label}, slice {s}')
+            axes[row, col].set_title(f'{label}\nslice {s}')
             axes[row, col].set_xlabel('x (voxels)', fontsize=14)
             if col == 0:
                 axes[row, col].set_ylabel('y (voxels)', fontsize=14)
@@ -731,13 +783,23 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                    label=r'$D_{\rm prior}$')
         ax.scatter(k_flat[mask], Q_like_D[mask] + Q_prior_D[mask], s=0.5, alpha=0.3,
                    label=r'$D_{\rm posterior}$')
+        if Q_like_k_nodes is not None and Q_like_D_nodes is not None:
+            ax.scatter(Q_like_k_nodes, Q_like_D_nodes, marker='x', s=60,
+                       color='k', linewidths=1.5, zorder=5,
+                       label=r'$D_{\rm like}$ k-nodes')
         ax.axvline(x=k_Nq, color='r', linestyle='--', lw=1, label=r'$k_{\rm Nyq}$')
 
         ax.set_xscale('log')
         ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
         ax.set_ylabel(r'$D(k)$', fontsize=14)
         ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
-        ax.legend(loc='upper right', markerscale=8)
+        leg = ax.legend(loc='upper right', markerscale=8)
+        # markerscale=8 is needed for the tiny s=0.5 scatter dots but makes
+        # the s=60 k-nodes marker huge; reset any oversized legend handles
+        for lh in leg.legend_handles:
+            if hasattr(lh, 'set_sizes') and len(lh.get_sizes()) > 0:
+                if lh.get_sizes()[0] > 500:
+                    lh.set_sizes([30])
         ax.grid(alpha=0.15)
         fig.tight_layout()
         fig.savefig(os.path.join(save_dir, f'6_Q_diagonals_{run_name}.png'), bbox_inches='tight')
@@ -835,6 +897,285 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
             f.write(f'Samples summary: {run_name}\n')
             f.write(f'{"=" * 50}\n\n')
             f.writelines(summary_lines)
+
+def plot_training_data(store_path, index, box,
+                       cosmo_params=None, MAS=None,
+                       save_dir=None, n_workers=None,
+                       use_rescaling_factor=True):
+    """Diagnostic plots for a single training sample from a Quijote ZarrStore.
+
+    Loads one simulation (delta_z0, delta_z127) and produces five figures
+    characterising the fields individually and relative to linear theory.
+    Reuses the same Pylians / CLASS helpers as plot_samples_analysis.
+
+    Figures saved to ``save_dir`` (default: ``./data_scripts/plots/<store_name>/``):
+      0. Field slices — 2 rows × 3 cols (ICs top, final field bottom).
+      1. 1-point PDFs — ICs (left) and final field (right) with stats annotations.
+      2. Power spectra — P(k) and P(k)/P_class ratios; ICs vs linear, final vs
+         linear + halofit.
+      3. Bispectra Q(θ) — 2 triangle configs × 2 fields (2×2 grid).
+      4. Cross-correlation C(k) between ICs and final field.
+
+    Parameters
+    ----------
+    store_path : str
+        Path to the swyft ZarrStore directory.
+    index : int
+        Simulation index to load.
+    box : Power_Spectrum_Sampler
+        Box object (for k-grid, box_size, and get_pk_pylians).
+    cosmo_params : dict, optional
+        CLASS cosmological parameters.  Defaults to Quijote fiducial
+        (_QUIJOTE_FIDUCIAL_COSMO).
+    MAS : str or None
+        Pylians mass-assignment scheme for P(k) / bispectrum (default None).
+    save_dir : str, optional
+        Output directory.  Defaults to ``./data_scripts/plots/<store_name>/``.
+    n_workers : int, optional
+        Max workers for ProcessPoolExecutor (bispectrum computation).
+    use_rescaling_factor : bool, optional
+        If True (default), rescale delta_z127 by D(0)/D(127) for plotting and
+        compare its P(k) against D²·P_class (Quijote convention).
+        Set to False when delta_z127 is already at z=0 amplitude (e.g. Disco-DJ).
+    """
+    import swyft
+
+    if cosmo_params is None:
+        cosmo_params = _QUIJOTE_FIDUCIAL_COSMO
+
+    # ── Load data ─────────────────────────────────────────────────────────
+    store      = swyft.ZarrStore(store_path)
+    sample     = store[index]
+    delta_z0   = np.asarray(sample['delta_z0'],   dtype=np.float32)
+    delta_z127 = np.asarray(sample['delta_z127'], dtype=np.float32)
+    N          = delta_z127.shape[0]
+
+    store_name = os.path.basename(store_path.rstrip('/'))
+    if save_dir is None:
+        save_dir = os.path.join('./data_scripts/plots', store_name)
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    tag = f'{store_name}_i{index}'
+
+    if use_rescaling_factor:
+        D_ratio = (growth_D_approx(cosmo_params, 127) /
+                   growth_D_approx(cosmo_params, 0))
+    else:
+        D_ratio = 1.0
+
+    # Build cosmology annotation handles (used in all figures)
+    Omega_m_val = cosmo_params.get('Omega_b', 0) + cosmo_params.get('Omega_cdm', 0)
+    _cosmo_param_lines = [
+        (r'$\Omega_m$', Omega_m_val),
+        (r'$\Omega_b$', cosmo_params['Omega_b']),
+        (r'$h$',        cosmo_params['h']),
+        (r'$n_s$',      cosmo_params['n_s']),
+        (r'$\sigma_8$', cosmo_params['sigma8']),
+    ]
+    _cosmo_handles = [
+        plt.Line2D([], [], linestyle='none', label=f'{name} $=$ {val:.4f}')
+        for name, val in _cosmo_param_lines
+    ]
+    _cosmo_slice_text = '   '.join(
+        f'{name} = {val:.4f}' for name, val in _cosmo_param_lines
+    )
+
+    # ── Figure 0: field slices (2 rows × 3 cols) ──────────────────────────
+    slices = [N // 4, N // 4 + N // 8, N // 2]
+    vabs   = 3.0
+    # ICs rescaled to z=0 amplitude for visual comparison
+    ic_plot    = delta_z127 / D_ratio
+    row_data   = [ic_plot,   delta_z0]
+    row_cmaps  = ['seismic', 'inferno']
+    row_vlims  = [(-vabs, vabs), (-2, 10)]
+    _ic_slice_label = (r'ICs $\times\,D(0)/D(127)$  (z=127→0 scale)'
+                       if use_rescaling_factor else 'ICs (z=0 amplitude)')
+    row_labels = [_ic_slice_label, 'Final field (z=0)']
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 12), sharey=True)
+    for row, (data, label, cmap, (vmin, vmax)) in enumerate(
+            zip(row_data, row_labels, row_cmaps, row_vlims)):
+        for col, s in enumerate(slices):
+            im = axes[row, col].imshow(data[s], origin='lower', cmap=cmap,
+                                       vmin=vmin, vmax=vmax)
+            axes[row, col].set_title(f'{label}\nslice {s}')
+            axes[row, col].set_xlabel('x (voxels)', fontsize=12)
+            if col == 0:
+                axes[row, col].set_ylabel('y (voxels)', fontsize=12)
+        cbar_ax = fig.add_axes([
+            axes[row, 2].get_position().x1 + 0.01,
+            axes[row, 2].get_position().y0,
+            0.01,
+            axes[row, 2].get_position().height,
+        ])
+        plt.colorbar(im, cax=cbar_ax)
+    fig.text(0.5, 0.5, _cosmo_slice_text, ha='center', va='center', fontsize=10,
+             bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.85,
+                       edgecolor='0.6'))
+    fig.savefig(os.path.join(save_dir, f'0_slices_{tag}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Figure 1: 1-point PDFs ────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    _ic_pdf_label = 'ICs (z=127)' if use_rescaling_factor else 'ICs (z=0 amplitude)'
+    for ax, field, title in zip(axes,
+                                 [delta_z127, delta_z0],
+                                 [_ic_pdf_label, 'Final field (z=0)']):
+        x = field.ravel().astype(np.float64)
+        lo, hi = np.percentile(x, [0.1, 99.9])
+        ax.hist(x, bins=120, range=(lo, hi), density=True,
+                histtype='stepfilled', alpha=0.6)
+        mu_v  = float(x.mean())
+        sig_v = float(x.std(ddof=1))
+        g1_v  = float(skew(x, bias=False))
+        g2_v  = float(kurtosis(x, fisher=True, bias=False))
+        txt = (rf'$\mu = {mu_v:.2e}$' + '\n' +
+               rf'$\sigma = {sig_v:.3f}$' + '\n' +
+               rf'$\gamma_1 = {g1_v:.2e}$' + '\n' +
+               rf'$\gamma_2 = {g2_v:.2e}$')
+        ax.text(0.97, 0.97, txt, transform=ax.transAxes,
+                va='top', ha='right', fontsize=9)
+        ax.set_xlabel(r'$\delta$', fontsize=13)
+        ax.set_ylabel('PDF', fontsize=13)
+        ax.set_title(title)
+        ax.grid(alpha=0.15)
+    axes[0].legend(handles=_cosmo_handles, fontsize=8, loc='upper left')
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'1_1pt_pdf_{tag}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Compute power spectra + CLASS references ───────────────────────────
+    k_ic,  pk_ic  = box.get_pk_pylians(delta_z127, MAS=MAS)
+    k_z0,  pk_z0  = box.get_pk_pylians(delta_z0,   MAS=MAS)
+    k_min        = min(k_ic[0], k_z0[0]) * 0.5
+    k_max        = max(k_ic[-1], k_z0[-1]) * 1.5
+    k_lin        = np.logspace(np.log10(k_min), np.log10(k_max), 200)
+    pk_class_lin = get_pk_class(cosmo_params, 0, k_lin, non_lin=False)
+    pk_class_nl  = get_pk_class(cosmo_params, 0, k_lin, non_lin=True)
+    pk_class_ic  = D_ratio ** 2 * pk_class_lin
+
+    # ── Figure 2: power spectra + ratios (2×2) ────────────────────────────
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex='col',
+                             gridspec_kw={'height_ratios': [2, 1]})
+    k_Nq = box.k_Nq
+
+    # top-left: ICs P(k)
+    ax = axes[0, 0]
+    ax.loglog(k_ic,  pk_ic,         lw=1.5, label='ICs sim')
+    ax.loglog(k_lin, pk_class_ic,   lw=1,   ls='--', color='k', alpha=0.6,
+              label=r'CLASS linear $\times D^2$')
+    ax.axvline(k_Nq, color='r', ls='--', lw=0.7, alpha=0.5)
+    ax.set_ylabel(r'$P(k)$ [(Mpc/h)³]', fontsize=12)
+    ax.set_title('ICs (z=127)' if use_rescaling_factor else 'ICs (z=0 amplitude)')
+    leg1 = ax.legend(fontsize=8, loc='upper right')
+    ax.add_artist(leg1)
+    ax.legend(handles=_cosmo_handles, fontsize=8, loc='lower left')
+    ax.grid(which='both', alpha=0.1)
+
+    # top-right: final field P(k)
+    ax = axes[0, 1]
+    ax.loglog(k_z0,  pk_z0,         lw=1.5, label='Final sim')
+    ax.loglog(k_lin, pk_class_lin,  lw=1,   ls='--', color='0.5', alpha=0.8,
+              label='CLASS linear')
+    ax.loglog(k_lin, pk_class_nl,   lw=1,   ls='-',  color='k', alpha=0.6,
+              label='CLASS halofit')
+    ax.axvline(k_Nq, color='r', ls='--', lw=0.7, alpha=0.5)
+    ax.set_title('Final field (z=0)')
+    ax.legend(fontsize=8)
+    ax.grid(which='both', alpha=0.1)
+
+    # bottom-left: ICs ratio
+    ax = axes[1, 0]
+    ratio_ic = pk_ic / np.interp(k_ic, k_lin, pk_class_ic)
+    ax.semilogx(k_ic, ratio_ic, lw=1.5, label='sim / CLASS linear')
+    ax.axhline(1.0, color='k', ls='--', lw=0.8)
+    ax.axvline(k_Nq, color='r', ls='--', lw=0.7, alpha=0.5)
+    ax.set_xlabel(r'$k$ [h/Mpc]', fontsize=12)
+    ax.set_ylabel(r'$P_\mathrm{sim} / P_\mathrm{CLASS}$', fontsize=11)
+    ax.set_ylim(0.5, 2.0)
+    ax.legend(fontsize=8)
+    ax.grid(which='both', alpha=0.1)
+
+    # bottom-right: final field ratios (vs linear and halofit)
+    ax = axes[1, 1]
+    ratio_lin = pk_z0 / np.interp(k_z0, k_lin, pk_class_lin)
+    ratio_nl  = pk_z0 / np.interp(k_z0, k_lin, pk_class_nl)
+    ax.semilogx(k_z0, ratio_lin, lw=1.5, ls='--', color='0.5', label='sim / CLASS linear')
+    ax.semilogx(k_z0, ratio_nl,  lw=1.5,            label='sim / halofit')
+    ax.axhline(1.0, color='k', ls=':', lw=0.8)
+    ax.axvline(k_Nq, color='r', ls='--', lw=0.7, alpha=0.5)
+    ax.set_xlabel(r'$k$ [h/Mpc]', fontsize=12)
+    ax.set_ylim(0.5, 2.0)
+    ax.legend(fontsize=8)
+    ax.grid(which='both', alpha=0.1)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'2_power_spectra_{tag}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Figure 3: bispectra Q(θ) (2×2) ───────────────────────────────────
+    theta          = np.linspace(0, np.pi, 25)
+    theta_deg      = np.degrees(theta)
+    bispec_configs = [
+        {'k1': 0.1,  'k2': 0.1,  'label': r'$k_1 = k_2 = 0.1\;h/\mathrm{Mpc}$'},
+        {'k1': 0.05, 'k2': 0.1,  'label': r'$k_1 = 0.05,\;k_2 = 0.1\;h/\mathrm{Mpc}$'},
+    ]
+    fields_bk  = [delta_z127, delta_z0]
+    field_lbls = ['ICs (z=127)' if use_rescaling_factor else 'ICs (z=0 amplitude)',
+                  'Final (z=0)']
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharey='row')
+    for row, cfg in enumerate(bispec_configs):
+        for col, (field, flbl) in enumerate(zip(fields_bk, field_lbls)):
+            BBk = PKL.Bk(field, box.box_size, cfg['k1'], cfg['k2'], theta, MAS, threads=1)
+            if col == 0:  # ICs: rescale to z=0 amplitude for fair comparison (no-op if D_ratio=1)
+                Q_plot = BBk.Q * D_ratio
+                label  = (r'$Q(\theta)$ of ICs rescaled to $z{=}0$ amplitude'
+                          '\n'r'($\delta_{z127} \times D(z{=}0)/D(z{=}127)$)'
+                          if use_rescaling_factor else r'$Q(\theta)$ of ICs (z=0 amplitude)')
+                axes[row, col].plot(theta_deg, Q_plot, lw=1.5, label=label)
+                _h, _ = axes[row, col].get_legend_handles_labels()
+                leg1 = axes[row, col].legend(handles=_h, fontsize=7, loc='upper right')
+                axes[row, col].add_artist(leg1)
+                if row == 0:
+                    axes[row, col].legend(handles=_cosmo_handles, fontsize=7, loc='lower left')
+            else:
+                axes[row, col].plot(theta_deg, BBk.Q, lw=1.5)
+            axes[row, col].set_xlabel(r'$\theta$ [deg]', fontsize=12)
+            axes[row, col].set_title(f'{flbl}\n{cfg["label"]}', fontsize=10)
+            axes[row, col].grid(alpha=0.15)
+            axes[row, col].tick_params(labelleft=True)
+        axes[row, 0].set_ylabel(r'$Q(\theta)$', fontsize=14)
+        axes[row, 1].set_ylabel(r'$Q(\theta)$', fontsize=14)
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'3_bispectrum_{tag}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Figure 4: cross-correlation C(k) ─────────────────────────────────
+    Pk_cross = PKL.XPk([delta_z127, delta_z0], box.box_size, axis=0,
+                        MAS=[MAS, MAS], threads=1)
+    C_k = (Pk_cross.XPk[:, 0, 0] /
+           np.sqrt(Pk_cross.Pk[:, 0, 0] * Pk_cross.Pk[:, 0, 1]))
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.semilogx(Pk_cross.k3D, C_k, lw=1.5, label=r'$C(k)$ ICs × Final')
+    ax.axhline(0., color='k', ls='--', lw=0.8)
+    ax.axhline(1.0, color='k', ls='--', lw=0.8)
+    ax.axvline(k_Nq, color='r', ls='--', lw=0.7, alpha=0.5, label=r'$k_\mathrm{Nyq}$')
+    ax.set_xlabel(r'$k$ [h/Mpc]', fontsize=12)
+    ax.set_ylabel(r'$C(k)$', fontsize=13)
+    ax.set_title('Cross-correlation: ICs vs final field')
+    ax.set_ylim(-0.1, 1.15)
+    leg1 = ax.legend(fontsize=9, loc='upper right')
+    ax.add_artist(leg1)
+    ax.legend(handles=_cosmo_handles, fontsize=9, loc='lower left')
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'4_cross_correlation_{tag}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    print(f'plot_training_data: 5 figures saved to {save_dir}')
 
 
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,

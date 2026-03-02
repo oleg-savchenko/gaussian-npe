@@ -4,9 +4,9 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=3:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=./job_outputs/%x-%j-%N_slurm.out
-#SBATCH --error=./job_outputs/%x-%j-%N_slurm.err
+#SBATCH --error=./job_outputs/R-%x.%j.err
 ## Activate right env
 
 module load 2024
@@ -22,8 +22,18 @@ export PYTHONNOUSERSITE=0
 
 cd /home/osavchenko/gaussian_npe
 
+# srun python data_scripts/discodj_store.py
+# srun python scripts/train.py --plot_only --output_dir ./runs/20260301_193604_WienerIsotropicD_test
 # srun python3 scripts/train.py --network UNet_Only --max_epochs 60 --num_samples 100 --run_name UNet_Only_run_optimized
-python scripts/train.py --network IsotropicD --max_epochs 60 --run_name IsotropicD_run_bugfix
+
+# python scripts/train.py --network default_IsotropicD --max_epochs 70 --run_name defaultIsotropicD
+
+python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1
+
+# srun python scripts/train.py --network WienerIsotropicD --max_epochs 120 \
+#         --ckpt_path ./runs/20260224_192240_WienerIsotropicD/logs/tb_logs/version_0/checkpoints/epoch=57-step=11600.ckpt
+
+# srun python scripts/train.py --run_name Poisson_noise --network Poisson --max_epochs 60 \
 
 # srun python3 scripts/infer.py --model_dir runs/20260220_152350_WienerNet_resumed
 
@@ -42,6 +52,8 @@ python scripts/train.py --network IsotropicD --max_epochs 60 --run_name Isotropi
 #     --sigma_noise 0.1 \
 #     --num_samples 100
 
-# python scripts/fit_D_spectrum.py \
+# srun python scripts/fit_D_spectrum.py \
 #     --model_dir runs/20260220_152350_WienerNet_resumed \
 #     --n_bins 40 \
+
+# python paper_test_runs/sweep_networks.py --max_epochs 70 --time 5:00:00

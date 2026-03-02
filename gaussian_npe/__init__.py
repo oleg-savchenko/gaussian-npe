@@ -15,6 +15,9 @@ from gaussian_npe.networks import (
     Gaussian_NPE_LH,
     Gaussian_NPE_CustomUNet,
     Gaussian_NPE_IsotropicD,
+    Gaussian_NPE_WienerIsotropicD,
+    Gaussian_NPE_Default_IsotropicD,
+    Gaussian_NPE_Poisson,
     MAP_MSE_Network,
 )
 from gaussian_npe.utils import LinearWienerFilter

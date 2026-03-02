@@ -78,7 +78,10 @@ def build_train_cmd(run_name, sigma_noise, args):
         parts.append(f'    --store_path {args.store_path}')
     if args.target_path is not None:
         parts.append(f'    --target_path {args.target_path}')
-    return 'srun python3 scripts/train.py \\\n' + ' \\\n'.join(parts)
+    if args.network == 'Poisson':
+        parts.append(f'    --n_bar {args.n_bar}')
+        parts.append(f'    --galaxy_bias {args.galaxy_bias}')
+    return 'python3 scripts/train.py \\\n' + ' \\\n'.join(parts)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -118,6 +121,10 @@ def main():
                         help='Override the default ZarrStore path')
     parser.add_argument('--target_path', type=str, default=None,
                         help='Override the default target .pt file path')
+    parser.add_argument('--n_bar', type=float, default=5e-4,
+                        help='Galaxy number density [h^3/Mpc^3] for Poisson network')
+    parser.add_argument('--galaxy_bias', type=float, default=1.5,
+                        help='Linear galaxy bias for Poisson network')
 
     args = parser.parse_args()
 

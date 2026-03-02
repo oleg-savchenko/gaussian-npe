@@ -1,8 +1,9 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
 import swyft
 from map2map.models import UNet
-from CustomUNET import UNet as CustomUNet
+from gaussian_npe.CustomUNET import UNet as CustomUNet
 from gaussian_npe.matrices import (
     Precision_Matrix_From_Factors,
     Precision_Matrix_FFT,
@@ -50,7 +51,7 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
 
         optimizer = torch.optim.AdamW(
             [
-                {'params': other_params, 'weight_decay': 1e-4},
+                {'params': other_params, 'weight_decay': 1e-2},
                 {'params': per_mode,     'weight_decay': 0.0},
             ],
             lr=self.learning_rate,
@@ -140,7 +141,7 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
         correction applies it analytically at inference time.
         """
         z = self.estimator(x_obs.unsqueeze(0)).squeeze(0).detach() * self.rescaling_factor
-        return z - z.mean()
+        return z
 
     def sample(self, num_samples, x_obs=None, z_MAP=None, to_numpy=True):
         """Samples the posterior for a given x_obs or z_MAP (provide exactly one)."""
@@ -383,54 +384,82 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
     The ZarrStore must contain 'sim_params' of shape (5,) per sample:
         [Omega_m, Omega_b, h, n_s, sigma_8]
 
-    The estimator, Q matrices, and loss are identical to Gaussian_NPE_Network.
-    Only the rescaling in forward() is changed to be per-sample.
+    The estimator (sigmoid filter + UNet + scale) is identical to
+    Gaussian_NPE_Network.  The posterior precision Q_post is a single learned
+    isotropic Precision_Matrix_IsotropicNodes — no Q_prior / Q_like split.
 
-    For inference, call set_rescaling(sim_params) with the target's
-    cosmological parameters before using get_z_MAP() / sample().
+    Rationale: the 2000 LH cosmologies each have a different P(k), making a
+    fixed fiducial Q_prior incorrect.  Instead of supplying per-sample P(k),
+    Q_post is learned directly.  At the loss minimum,
+    D_post(k) = 1 / E[|z_k − b_k|²], which is the true posterior precision
+    regardless of the prior/likelihood decomposition.
     """
 
-    Z_IC = 127
-
-    @staticmethod
-    def _growth_D_tensor(Omega_m, z):
-        """Tensor-compatible growth factor approximation D(z) for flat LCDM."""
-        Omega_L = 1.0 - Omega_m
-        Om_m = Omega_m * (1.0 + z) ** 3 / (Omega_L + Omega_m * (1.0 + z) ** 3)
-        Om_L = Omega_L / (Omega_L + Omega_m * (1.0 + z) ** 3)
-        return (1.0 / (1.0 + z)) * (5.0 * Om_m / 2.0) / (
-            Om_m ** (4.0 / 7.0) - Om_L
-            + (1.0 + Om_m / 2.0) * (1.0 + Om_L / 70.0)
+    def __init__(self, box, *args, n_nodes=32, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        # Single learned Q_post — no prior/likelihood decomposition.
+        self.Q_post = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes,
         )
+        del self.Q_like   # N³ Precision_Matrix_FFT from parent — not used
+        del self.Q_prior  # fiducial Precision_Matrix_From_Factors — not used
 
-    def _compute_rescaling(self, sim_params):
-        """Compute D(z_ic)/D(0) per sample from sim_params.
+    # Z_IC = 127
 
-        Args:
-            sim_params: (B, 5) tensor [Omega_m, Omega_b, h, n_s, sigma_8]
-        Returns:
-            (B,) tensor of rescaling factors
-        """
-        Omega_m = sim_params[:, 0]
-        return (
-            self._growth_D_tensor(Omega_m, self.Z_IC)
-            / self._growth_D_tensor(Omega_m, 0.0)
-        )
+    # @staticmethod
+    # def _growth_D_tensor(Omega_m, z):
+    #     """Tensor-compatible growth factor approximation D(z) for flat LCDM."""
+    #     Omega_L = 1.0 - Omega_m
+    #     Om_m = Omega_m * (1.0 + z) ** 3 / (Omega_L + Omega_m * (1.0 + z) ** 3)
+    #     Om_L = Omega_L / (Omega_L + Omega_m * (1.0 + z) ** 3)
+    #     return (1.0 / (1.0 + z)) * (5.0 * Om_m / 2.0) / (
+    #         Om_m ** (4.0 / 7.0) - Om_L
+    #         + (1.0 + Om_m / 2.0) * (1.0 + Om_L / 70.0)
+    #     )
 
-    def set_rescaling(self, sim_params):
-        """Set rescaling_factor for inference from a single sim_params vector.
+    # def _compute_rescaling(self, sim_params):
+    #     """Compute D(z_ic)/D(0) per sample from sim_params.
 
-        Args:
-            sim_params: array-like of shape (5,) [Omega_m, Omega_b, h, n_s, sigma_8]
-        """
-        from gaussian_npe.utils import growth_D_approx
-        cosmo = {
-            'Omega_cdm': float(sim_params[0]) - float(sim_params[1]),
-            'Omega_b': float(sim_params[1]),
-        }
-        self.rescaling_factor = (
-            growth_D_approx(cosmo, self.Z_IC) / growth_D_approx(cosmo, 0)
-        )
+    #     Args:
+    #         sim_params: (B, 5) tensor [Omega_m, Omega_b, h, n_s, sigma_8]
+    #     Returns:
+    #         (B,) tensor of rescaling factors
+    #     """
+    #     Omega_m = sim_params[:, 0]
+    #     return (
+    #         self._growth_D_tensor(Omega_m, self.Z_IC)
+    #         / self._growth_D_tensor(Omega_m, 0.0)
+    #     )
+
+    # def set_rescaling(self, sim_params):
+    #     """Set rescaling_factor for inference from a single sim_params vector.
+
+    #     Args:
+    #         sim_params: array-like of shape (5,) [Omega_m, Omega_b, h, n_s, sigma_8]
+    #     """
+    #     from gaussian_npe.utils import growth_D_approx
+    #     cosmo = {
+    #         'Omega_cdm': float(sim_params[0]) - float(sim_params[1]),
+    #         'Omega_b': float(sim_params[1]),
+    #     }
+    #     self.rescaling_factor = (
+    #         growth_D_approx(cosmo, self.Z_IC) / growth_D_approx(cosmo, 0)
+    #     )
+
+    def sample(self, num_samples, x_obs=None, z_MAP=None, to_numpy=True):
+        """Sample the posterior using Q_post directly (no Q_prior / Q_like split)."""
+        if (x_obs is None) == (z_MAP is None):
+            raise ValueError("Provide exactly one of x_obs or z_MAP")
+        if z_MAP is None:
+            z_MAP = self.get_z_MAP(x_obs)
+        D_post = self.Q_post.D.detach() * self.rescaling_factor**-2
+        std = D_post**-0.5
+        std[0] = 0.0   # k=0 monopole never sampled (zero-mean constraint)
+        draws = []
+        for _ in range(num_samples):
+            z = self.Q_post.G_T(std * torch.randn_like(D_post)) + z_MAP
+            draws.append(z.cpu().numpy() if to_numpy else z.cpu())
+        return draws
 
     def forward(self, A, B):
         x = A['delta_z0']
@@ -438,9 +467,12 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
         b = self.estimator(x)
 
         z = B['delta_z127'][:len(x)]
-        sim_params = B['sim_params'][:len(x)]          # (B, 5)
-        rescaling = self._compute_rescaling(sim_params) # (B,)
+        # Rescaling factor precomputed per-sample by data_scripts/quijote_lh.py
+        rescaling = B['rescaling_factor'][:len(x), 0]   # (B, 1) → (B,)
         z = z / rescaling[:, None, None, None]
+        # [OLD — on-the-fly computation from sim_params, kept for reference]
+        # sim_params = B['sim_params'][:len(x)]          # (B, 5)
+        # rescaling = self._compute_rescaling(sim_params) # (B,)
 
         return self.loss(b, z)
 
@@ -517,6 +549,131 @@ class Gaussian_NPE_IsotropicD(Gaussian_NPE_Base):
         p3d = 6 * (20,)
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
         x = x + self.unet(xx.unsqueeze(1)).squeeze(1)
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
+
+
+class Gaussian_NPE_Poisson(Gaussian_NPE_Base):
+    """Gaussian NPE with Poisson galaxy shot-noise forward model.
+
+    UNet-only estimator + isotropic D_like(|k|) likelihood precision.
+    The Poisson forward model replaces the Gaussian noise injection:
+
+        N_gal(r) ~ Poisson(N_bar * (1 + galaxy_bias * delta_z0(r)).clamp(0))
+        x_eff(r) = (N_gal(r) / N_bar - 1) / galaxy_bias  ≈  delta_z0 + shot_noise
+
+    where N_bar = n_bar * V_voxel.  The effective Gaussian-equivalent noise level
+    is sigma_eff = 1 / (galaxy_bias * sqrt(N_bar)).
+    """
+
+    def __init__(self, box, prior, n_bar, galaxy_bias=1.5, n_nodes=32, **kwargs):
+        V_voxel = (box.box_size / box.N) ** 3
+        sigma_noise_eff = 1.0 / (galaxy_bias * (n_bar * V_voxel) ** 0.5)
+        super().__init__(box, prior, sigma_noise=sigma_noise_eff, **kwargs)
+        self.n_bar       = n_bar
+        self.galaxy_bias = galaxy_bias
+        self.V_voxel     = V_voxel
+        
+        self.Q_like = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes,
+        )
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        x = x + self.unet(xx.unsqueeze(1)).squeeze(1)
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
+
+    def forward(self, A, B):
+        x = A['delta_z0']
+        N_bar  = self.n_bar * self.V_voxel
+        N_mean = (N_bar * (1 + self.galaxy_bias * x)).clamp(min=0)
+        N_obs  = torch.poisson(N_mean)
+        x = N_obs / (N_bar * self.galaxy_bias) - 1.0 / self.galaxy_bias
+
+        b = self.estimator(x)
+        z = B['delta_z127'][:len(x)]
+        z = self.rescaling_factor**-1 * z
+        return self.loss(b, z)
+
+
+class Gaussian_NPE_WienerIsotropicD(Gaussian_NPE_Base):
+    """Wiener filter + UNet estimator with isotropic learnable likelihood precision.
+
+    Combines the physically-motivated Wiener filter backbone of WienerNet with
+    the compact isotropic D_like(k) parameterization of IsotropicD:
+
+        D_like(|k|) = exp(interp(log|k|; log_D_nodes))   [32 learnable values]
+        w(k) = D_like(k) / (D_prior(k) + D_like(k))       [Wiener weight]
+        mu(x) = G_T(G(x) * w) + UNet(x)                   [filter + residual]
+
+    Initialization: log_D_nodes = log(1/sigma_noise²) so that at the start of
+    training the Wiener weight equals the exact analytic Wiener filter for
+    white observation noise with variance sigma_noise².  Training then refines
+    D_like(k) away from white noise if the data supports it.
+    """
+
+    def __init__(self, box, *args, n_nodes=32, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        log_D_init = 0. #-2.0 * np.log(self.sigma_noise)   # log(1/sigma_noise²)
+        self.Q_like = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes, log_D_init=log_D_init,
+        )
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
+
+    def estimator(self, x):
+        x_h = self.Q_post.G(x)
+        D_prior = self.Q_prior.D
+        D_like  = self.Q_like.D
+        w = D_like / (D_prior + D_like)
+        x_wiener = self.Q_post.G_T(x_h * w)
+
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        correction = self.unet(xx.unsqueeze(1)).squeeze(1)
+        x = x_wiener + correction
+        return x - x.mean(dim=(-3, -2, -1), keepdim=True)
+
+
+class Gaussian_NPE_Default_IsotropicD(Gaussian_NPE_Base):
+    """Default (sigmoid filter + isotropic scale) architecture with isotropic Q_like.
+
+    Combines the estimator structure of Gaussian_NPE_Network with the compact
+    isotropic parameterizations of IsotropicD / WienerIsotropicD:
+
+        D_like(|k|) = exp(interp(log|k|; log_D_nodes))     [n_nodes params]
+        scale(|k|)  = exp(interp(log|k|; log_scale_nodes)) [n_nodes params]
+        mu(x) = G_T(scale(|k|) · G(x + sigmoid_filter(UNet(x))))
+
+    Both scale and D_like are interpolated on the same shell-snapped k-nodes,
+    reusing Q_like's precomputed _left_idx / _right_idx / _frac buffers (no
+    additional N³ buffers).
+    Initialized: log_scale_nodes = 0 → scale = 1; log_D_nodes = 0 → D = 1.
+    """
+
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, n_nodes=32, **kwargs):
+        super().__init__(box, *args, **kwargs)
+        self.k_cut = k_cut
+        self.w_cut = w_cut
+        self.Q_like = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes,
+        )
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
+        self.log_scale_nodes = torch.nn.Parameter(torch.zeros(n_nodes))
+
+    @property
+    def _isotropic_scale(self):
+        """Interpolate log_scale_nodes → per-mode scale factors, shape (N³,)."""
+        log_s = ((1 - self.Q_like._frac) * self.log_scale_nodes[self.Q_like._left_idx]
+                 +     self.Q_like._frac  * self.log_scale_nodes[self.Q_like._right_idx])
+        return log_s.exp()
+
+    def estimator(self, x):
+        p3d = 6 * (20,)
+        xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
+        xx = self.unet(xx.unsqueeze(1)).squeeze(1)
+        x = x + self.box.sigmoid_filter(xx, self.k_cut, self.w_cut)
+        x = self.Q_post.G_T(self.Q_post.G(x) * self._isotropic_scale)
         return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 

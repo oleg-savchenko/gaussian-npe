@@ -18,10 +18,12 @@ Usage:
         --batch_size 8 \
         --n_train 500 \
         --num_samples 100 \
-        --MAS PCS \
+        --MAS None \
         --noise_seed 42 \
         --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_fiducial_res128_deconv_MAK \
         --target_path ./Quijote_target/Quijote_sample0.pt \
+        --n_bar 5e-4 \
+        --galaxy_bias 1.5 \
         --cpus_per_task 18 \
         --time 1:00:00
 """
@@ -32,13 +34,20 @@ import argparse
 
 # ── Networks to sweep ────────────────────────────────────────────────
 # LH (Latin Hypercube) is excluded — it targets a different dataset.
+# MAP_MSE is excluded — it is not a posterior network and cannot participate
+# in calibration/amortization diagnostics.
 NETWORKS = [
     'default',
     'UNet_Only',
-    'WienerNet',
-    'LearnableFilter',
-    'SmoothFilter',
-    'Iterative',
+    # 'WienerNet',
+    # 'LearnableFilter',
+    # 'SmoothFilter',
+    # 'Iterative',
+    # 'CustomUNet',
+    'IsotropicD',
+    'WienerIsotropicD',
+    'default_IsotropicD',
+    # 'Poisson',
 ]
 
 # ── SLURM header template ────────────────────────────────────────────
@@ -85,7 +94,10 @@ def build_train_cmd(run_name, network, args):
         parts.append(f'    --store_path {args.store_path}')
     if args.target_path is not None:
         parts.append(f'    --target_path {args.target_path}')
-    return 'srun python3 scripts/train.py \\\n' + ' \\\n'.join(parts)
+    if network == 'Poisson':
+        parts.append(f'    --n_bar {args.n_bar}')
+        parts.append(f'    --galaxy_bias {args.galaxy_bias}')
+    return 'python3 scripts/train.py \\\n' + ' \\\n'.join(parts)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -122,6 +134,10 @@ def main():
                         help='Override the default ZarrStore path')
     parser.add_argument('--target_path', type=str, default='/home/osavchenko/Quijote/Quijote_target/Quijote_sample0_wout_MAK.pt',
                         help='Override the default target .pt file path')
+    parser.add_argument('--n_bar', type=float, default=5e-4,
+                        help='Galaxy number density [h^3/Mpc^3] for Poisson network')
+    parser.add_argument('--galaxy_bias', type=float, default=1.5,
+                        help='Linear galaxy bias for Poisson network')
 
     args = parser.parse_args()
 

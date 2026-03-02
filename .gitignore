@@ -18,6 +18,7 @@ plots/
 
 # Data
 Quijote_target/
+# data_scripts/
 *.zarr
 
 # Legacy scripts
@@ -25,6 +26,7 @@ scripts/os250301-Quijote_module_training.py
 
 # Text files
 text_files/
+scratch.txt
 
 # Python
 __pycache__/

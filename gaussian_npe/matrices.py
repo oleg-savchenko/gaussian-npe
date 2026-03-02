@@ -108,46 +108,71 @@ class Precision_Matrix_FFT(GDG_Factor_Matrix):
 class Precision_Matrix_IsotropicNodes(GDG_Factor_Matrix):
     """Isotropic D_like(k) parameterized via learnable log-amplitude nodes.
 
-    D(|k|) = exp(linear interpolation of log_D_nodes at log-spaced k-nodes)
+    D(|k|) = exp(linear interpolation of log_D_nodes at shell-snapped k-nodes)
 
     Only n_nodes parameters (default 32) instead of N³.  Three (N³,) buffers
     hold precomputed interpolation indices and fractions (~8 MB total vs.
     ~8 MB for a full N³ parameter tensor — but critically, the spectral shape
     is smooth and isotropic by construction).
 
+    Node placement: log-uniform targets are snapped to the nearest actual
+    k-shell (unique |k| value present in k_flat), with strict monotonicity
+    enforced.  This guarantees every node lies exactly on a real simulation
+    mode and therefore always receives non-zero gradient during training.
+
     G / G_T are identical to Precision_Matrix_FFT (Hartley transform).
     """
 
-    def __init__(self, N, k_flat, n_nodes=32):
+    def __init__(self, N, k_flat, n_nodes=32, log_D_init=0.0):
         """
         Args:
-            N      : grid side length (k grid is N³)
-            k_flat : (N³,) tensor of |k| values (box.k.flatten())
-            n_nodes: number of learnable log-D nodes (default 32)
+            N          : grid side length (k grid is N³)
+            k_flat     : (N³,) tensor of |k| values (box.k.flatten())
+            n_nodes    : number of learnable log-D nodes (default 32)
+            log_D_init : initial value for all log_D_nodes (default 0.0 → D=1).
+                         Set to log(1/sigma_noise²) for a white-noise initialization.
         """
         super().__init__()
         self.N = N
         self.shape = 3 * (N,)
 
-        k_F  = float(k_flat[k_flat > 0].min())
-        k_Nq = float(k_flat.max())
+        k_shells     = torch.unique(k_flat[k_flat > 0])  # M unique shells, ascending
+        log_k_shells = k_shells.log()
+        M            = len(k_shells)
+        k_F          = float(k_shells[0])
 
-        log_k_nodes = torch.linspace(
-            float(torch.tensor(k_F).log()),
-            float(torch.tensor(k_Nq).log()),
-            n_nodes,
-        )
+        # Original log-uniform placement (kept for reference / easy revert):
+        # k_Nq = float(k_flat.max())
+        # log_k_nodes = torch.linspace(
+        #     float(torch.tensor(k_F).log()),
+        #     float(torch.tensor(k_Nq).log()),
+        #     n_nodes,
+        # ).to(k_shells.device)
+
+        # Snap log-uniform targets to actual k-shells so every node receives
+        # gradient (avoids "phantom nodes" in gaps between discrete k-shells).
+        # Strict monotonicity: push any duplicate snap_idx up by 1.
+        targets  = torch.linspace(log_k_shells[0], log_k_shells[-1], n_nodes,
+                                  device=k_flat.device)
+        diffs    = (targets.unsqueeze(1) - log_k_shells.unsqueeze(0)).abs()
+        snap_idx = diffs.argmin(dim=1).tolist()
+        for i in range(1, n_nodes):
+            if snap_idx[i] <= snap_idx[i - 1]:
+                snap_idx[i] = snap_idx[i - 1] + 1
+        snap_idx    = torch.tensor(snap_idx, device=k_flat.device).clamp(0, M - 1)
+        log_k_nodes = log_k_shells[snap_idx]
+
         log_k = torch.log(k_flat.clamp(min=k_F))
-        log_k_nodes = log_k_nodes.to(log_k.device)
 
         idx  = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_nodes - 1)
         frac = ((log_k - log_k_nodes[idx - 1])
                 / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
 
-        self.register_buffer('_left_idx',  idx - 1)
-        self.register_buffer('_right_idx', idx)
-        self.register_buffer('_frac',      frac)
-        self.log_D_nodes = torch.nn.Parameter(torch.zeros(n_nodes))
+        self.register_buffer('_left_idx',   idx - 1)
+        self.register_buffer('_right_idx',  idx)
+        self.register_buffer('_frac',       frac)
+        self.register_buffer('_log_k_nodes', log_k_nodes, persistent=False)
+        self.log_D_nodes = torch.nn.Parameter(torch.full((n_nodes,), float(log_D_init)))
 
     def G(self, x):
         return hartley(x).flatten(-3, -1)
