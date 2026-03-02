@@ -41,7 +41,9 @@ class Gaussian_NPE_Base(swyft.AdamWReduceLROnPlateau, swyft.SwyftModule):
     def configure_optimizers(self):
         # Per-mode Hartley-space params: Q_like diagonal + any subclass filter/scale params.
         # These must NOT be weight-decayed — their optimal values are far from zero.
-        per_mode = list(self.Q_like.parameters())
+        # LH deletes Q_like and uses Q_post directly; fall back accordingly.
+        q_precision = self.Q_like if hasattr(self, 'Q_like') else self.Q_post
+        per_mode = list(q_precision.parameters())
         for attr in ('scale', 'filter_logit', 'filter_logit_nodes'):
             if hasattr(self, attr):
                 per_mode.append(getattr(self, attr))
