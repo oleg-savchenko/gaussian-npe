@@ -295,26 +295,35 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
         super().__init__(box, *args, **kwargs)
         self.scale = torch.nn.Parameter(torch.ones(self.N**3))
 
-        # Log-spaced nodes from k_F to k_Nq
-        log_k_nodes = torch.linspace(
-            float(torch.tensor(float(box.k_F)).log()),
-            float(torch.tensor(float(box.k_Nq)).log()),
-            n_filter_nodes,
-        )
+        k_flat = box.k.flatten()
+        k_shells     = torch.unique(k_flat[k_flat > 0])   # ascending unique shells
+        log_k_shells = k_shells.log()
+        M            = len(k_shells)
 
-        # Initialize node logits from the sigmoid baseline
+        # Snap log-uniform targets to actual k-shells (same approach as
+        # Precision_Matrix_IsotropicNodes) so every node always receives
+        # non-zero gradient — no phantom nodes.
+        targets  = torch.linspace(log_k_shells[0], log_k_shells[-1], n_filter_nodes,
+                                  device=k_flat.device)
+        diffs    = (targets.unsqueeze(1) - log_k_shells.unsqueeze(0)).abs()
+        snap_idx = diffs.argmin(dim=1).tolist()
+        for i in range(1, n_filter_nodes):
+            if snap_idx[i] <= snap_idx[i - 1]:
+                snap_idx[i] = snap_idx[i - 1] + 1
+        snap_idx    = torch.tensor(snap_idx, device=k_flat.device).clamp(0, M - 1)
+        log_k_nodes = log_k_shells[snap_idx]              # exactly on real shells
+
+        # Initialize node logits from the sigmoid baseline at each snapped k-node
         self.filter_logit_nodes = torch.nn.Parameter(
             (log_k_nodes.exp() - k_cut) / w_cut
         )
 
-        # Precompute fixed (N³, n_nodes) interpolation weight matrix
-        log_k = torch.log(box.k.flatten().clamp(min=float(box.k_F)))
-        log_k_nodes = log_k_nodes.to(log_k.device)
-        idx = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_filter_nodes - 1)
-        frac = ((log_k - log_k_nodes[idx - 1])
-                / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
+        # Precompute interpolation buffers
+        log_k = torch.log(k_flat.clamp(min=float(k_shells[0])))
+        idx   = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_filter_nodes - 1)
+        frac  = ((log_k - log_k_nodes[idx - 1])
+                 / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
 
-        # Each mode interpolates between node[idx-1] and node[idx]
         self.register_buffer('_left_idx',  idx - 1)
         self.register_buffer('_right_idx', idx)
         self.register_buffer('_frac',      frac)
