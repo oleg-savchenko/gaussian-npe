@@ -385,7 +385,7 @@ class Gaussian_NPE_Iterative(Gaussian_NPE_Base):
         return mu - mu.mean(dim=(-3, -2, -1), keepdim=True)
 
 
-class Gaussian_NPE_LH(Gaussian_NPE_Network):
+class Gaussian_NPE_LH(Gaussian_NPE_UNet_Only):
     """Variant for the Quijote Latin Hypercube dataset with varying cosmology.
 
     Instead of a fixed rescaling factor D(z_ic)/D(z=0) shared across all
@@ -395,9 +395,11 @@ class Gaussian_NPE_LH(Gaussian_NPE_Network):
     The ZarrStore must contain 'sim_params' of shape (5,) per sample:
         [Omega_m, Omega_b, h, n_s, sigma_8]
 
-    The estimator (sigmoid filter + UNet + scale) is identical to
-    Gaussian_NPE_Network.  The posterior precision Q_post is a single learned
-    isotropic Precision_Matrix_IsotropicNodes — no Q_prior / Q_like split.
+    Estimator: x + UNet(x)  (inherited from Gaussian_NPE_UNet_Only).
+    No sigmoid filter, no per-mode scale — avoids hyperparameters that
+    assume a fixed non-linear scale, which varies across LH cosmologies.
+    The posterior precision Q_post is a single learned isotropic
+    Precision_Matrix_IsotropicNodes — no Q_prior / Q_like split.
 
     Rationale: the 2000 LH cosmologies each have a different P(k), making a
     fixed fiducial Q_prior incorrect.  Instead of supplying per-sample P(k),

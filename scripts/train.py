@@ -321,7 +321,7 @@ def main():
         lr_scheduler_patience=args.lr_scheduler_patience,
     )
     # Only pass k_cut/w_cut to networks that accept them
-    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD', 'WienerIsotropicD', 'Poisson'):
+    if args.network not in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD', 'WienerIsotropicD', 'Poisson', 'LH'):
         net_kwargs['k_cut'] = args.k_cut
         net_kwargs['w_cut'] = args.w_cut
     # Poisson takes n_bar/galaxy_bias instead of sigma_noise
@@ -349,7 +349,7 @@ def main():
         # k_cut and w_cut are omitted for networks that don't use them.
         # n_bar and galaxy_bias are omitted for non-Poisson networks.
         _filter_keys = set()
-        if args.network in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD', 'WienerIsotropicD', 'Poisson'):
+        if args.network in ('UNet_Only', 'WienerNet', 'Iterative', 'MAP_MSE', 'CustomUNet', 'IsotropicD', 'WienerIsotropicD', 'Poisson', 'LH'):
             _filter_keys |= {'k_cut', 'w_cut'}
         if args.network != 'Poisson':
             _filter_keys |= {'n_bar', 'galaxy_bias'}
