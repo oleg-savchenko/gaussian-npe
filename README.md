@@ -62,22 +62,32 @@ All architectures share the same Gaussian posterior machinery (precision matrice
 | `Gaussian_NPE_Network` | `default` | Sigmoid high-pass filter + learnable per-mode scale |
 | `Gaussian_NPE_UNet_Only` | `UNet_Only` | Minimal baseline: x + UNet(x), no Fourier-space operations |
 | `Gaussian_NPE_WienerNet` | `WienerNet` | Wiener filter + UNet residual correction |
-| `Gaussian_NPE_LearnableFilter` | `LearnableFilter` | Learnable per-mode filter (N^3 free parameters) + scale |
+| `Gaussian_NPE_LearnableFilter` | `LearnableFilter` | Learnable per-mode filter (N³ free parameters) + scale |
 | `Gaussian_NPE_SmoothFilter` | `SmoothFilter` | Learnable smooth isotropic filter (~20 log-spaced k-nodes) + scale |
 | `Gaussian_NPE_Iterative` | `Iterative` | Multi-step 2-channel UNet refinement + scale |
-| `Gaussian_NPE_LH` | `LH` | Default estimator with per-sample rescaling for Latin Hypercube runs |
+| `Gaussian_NPE_CustomUNet` | `CustomUNet` | Deeper 4-level custom UNet residual (x + CustomUNet(x)) |
+| `Gaussian_NPE_IsotropicD` | `IsotropicD` | UNet residual + compact isotropic Q_like (~32 k-node amplitudes) |
+| `Gaussian_NPE_WienerIsotropicD` | `WienerIsotropicD` | Wiener filter + UNet residual + isotropic Q_like |
+| `Gaussian_NPE_Default_IsotropicD` | `default_IsotropicD` | Sigmoid filter + isotropic scale and Q_like (both ~32 k-nodes) |
+| `Gaussian_NPE_Poisson` | `Poisson` | UNet residual + Poisson galaxy shot-noise forward model + isotropic Q_like |
+| `Gaussian_NPE_LH` | `LH` | UNet residual estimator with direct Q_post learning for Latin Hypercube data (varying cosmology) |
 
 Class hierarchy:
 
 ```
 Gaussian_NPE_Base  (abstract — Q matrices, UNet, loss, sample, forward)
-├── Gaussian_NPE_Network       (sigmoid filter + scale)
-│   └── Gaussian_NPE_LH        (per-sample rescaling)
-├── Gaussian_NPE_UNet_Only     (x + UNet(x))
-├── Gaussian_NPE_WienerNet     (Wiener filter + UNet)
-├── Gaussian_NPE_LearnableFilter  (N³ learnable filter + scale)
-├── Gaussian_NPE_SmoothFilter     (~20 k-node smooth filter + scale)
-└── Gaussian_NPE_Iterative        (iterative 2-channel UNet + scale)
+├── Gaussian_NPE_Network            (sigmoid filter + scale)
+├── Gaussian_NPE_UNet_Only          (x + UNet(x))
+│   └── Gaussian_NPE_LH             (UNet-only + direct Q_post for LH cosmologies)
+├── Gaussian_NPE_WienerNet          (Wiener filter + UNet)
+├── Gaussian_NPE_LearnableFilter    (N³ learnable filter + scale)
+├── Gaussian_NPE_SmoothFilter       (~20 k-node smooth filter + scale)
+├── Gaussian_NPE_Iterative          (iterative 2-channel UNet + scale)
+├── Gaussian_NPE_CustomUNet         (deeper 4-level custom UNet residual)
+├── Gaussian_NPE_IsotropicD         (UNet residual + isotropic Q_like)
+├── Gaussian_NPE_WienerIsotropicD   (Wiener filter + UNet + isotropic Q_like)
+├── Gaussian_NPE_Default_IsotropicD (sigmoid filter + isotropic scale + isotropic Q_like)
+└── Gaussian_NPE_Poisson            (UNet residual + Poisson forward model + isotropic Q_like)
 ```
 
 ## Training data
@@ -130,7 +140,7 @@ All hyperparameters can be set via command-line flags (see `python scripts/train
 Training outputs are saved to `./runs/{timestamp}_{run_name}/`:
 
 ```
-runs/20260216_153000_baseline/
+runs/260216_153000_baseline/
     config.json         Full configuration for reproducibility
     model.pt            Model state dict
     logs/               TensorBoard logs and Lightning checkpoints
@@ -144,7 +154,7 @@ Training takes approximately 1.5 hours on a single 40GB NVIDIA A100 GPU.
 Load a trained model and generate posterior samples for a (potentially new) observation:
 
 ```bash
-python scripts/infer.py --model_dir ./runs/20260216_153000_baseline
+python scripts/infer.py --model_dir ./runs/260216_153000_baseline
 ```
 
 | Flag | Default | Description |
@@ -165,7 +175,7 @@ To evaluate calibration across many held-out observations:
 
 ```bash
 python scripts/infer.py \
-    --model_dir ./runs/20260216_153000_baseline \
+    --model_dir ./runs/260216_153000_baseline \
     --target_dir ./Quijote_target \
     --noise_seed 42
 ```
