@@ -185,7 +185,7 @@ def main():
         rescaling_factor=rescaling_factor,
     )
     if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet',
-                             'IsotropicD', 'WienerIsotropicD', 'Poisson'):
+                             'IsotropicD', 'WienerIsotropicD', 'Poisson', 'LH'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
         net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
 
