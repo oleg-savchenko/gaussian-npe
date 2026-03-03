@@ -22,37 +22,37 @@ export PYTHONNOUSERSITE=0
 
 cd /home/osavchenko/gaussian_npe
 
-# srun python data_scripts/discodj_store.py
-# srun python scripts/train.py --plot_only --output_dir ./runs/20260301_193604_WienerIsotropicD_test
-# srun python3 scripts/train.py --network UNet_Only --max_epochs 60 --num_samples 100 --run_name UNet_Only_run_optimized
+# python data_scripts/discodj_store.py
+# python scripts/train.py --plot_only --output_dir ./runs/20260301_193604_WienerIsotropicD_test
+# python3 scripts/train.py --network UNet_Only --max_epochs 60 --num_samples 100 --run_name UNet_Only_run_optimized
 
-# python scripts/train.py --network default_IsotropicD --max_epochs 70 --run_name defaultIsotropicD
+python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.003 --run_name defaultIsotropicD_w_cut_0.003
 
-python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1
+# python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1_train_only_Q_post
 
-# srun python scripts/train.py --network WienerIsotropicD --max_epochs 120 \
+# python scripts/train.py --network WienerIsotropicD --max_epochs 120 \
 #         --ckpt_path ./runs/20260224_192240_WienerIsotropicD/logs/tb_logs/version_0/checkpoints/epoch=57-step=11600.ckpt
 
-# srun python scripts/train.py --run_name Poisson_noise --network Poisson --max_epochs 60 \
+# python scripts/train.py --run_name Poisson_noise --network Poisson --max_epochs 60 \
 
-# srun python3 scripts/infer.py --model_dir runs/20260220_152350_WienerNet_resumed
+# python3 scripts/infer.py --model_dir runs/20260220_152350_WienerNet_resumed
 
-# srun python scripts/train.py --run_name test_customunet_4ch --network CustomUNet --max_epochs 50 --num_samples 100 #--n_train 100
+# python scripts/train.py --run_name test_customunet_4ch --network CustomUNet --max_epochs 50 --num_samples 100 #--n_train 100
 
-# srun python3 scripts/train.py \
+# python3 scripts/train.py \
 #     --run_name WienerNet_resumed \
 #     --network WienerNet \
 #     --max_epochs 100 \
 #     --ckpt_path ./runs/20260220_020149_WienerNet/logs/tb_logs/version_0/checkpoints/epoch=48-step=9800.ckpt
 
-# srun python3scripts/train.py --max_epochs 50 --num_samples 100 --run_name WienerNet --network WienerNet --max_epochs 50 #--n_train 100
+# python3 scripts/train.py --max_epochs 50 --num_samples 100 --run_name WienerNet --network WienerNet --max_epochs 50 #--n_train 100
 
-# srun python3 scripts/wiener_filter.py \
+# python3 scripts/wiener_filter.py \
 #     --target_path /home/osavchenko/Quijote/Quijote_target/Quijote_sample0_wout_MAK.pt \
 #     --sigma_noise 0.1 \
 #     --num_samples 100
 
-# srun python scripts/fit_D_spectrum.py \
+# python scripts/fit_D_spectrum.py \
 #     --model_dir runs/20260220_152350_WienerNet_resumed \
 #     --n_bins 40 \
 

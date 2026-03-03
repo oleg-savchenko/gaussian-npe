@@ -476,13 +476,18 @@ def main():
 
     z_MAP_np = z_MAP.cpu().numpy()
     samples_np = np.array(samples) / rescaling_factor if samples is not None else None
-    Q_like_D = network.Q_like.D.detach().cpu().numpy() if hasattr(network, 'Q_like') else None
-    Q_prior_D = network.Q_prior.D.detach().cpu().numpy() if hasattr(network, 'Q_prior') else None
-    Q_like_obj = getattr(network, 'Q_like', None)
+    with torch.no_grad():
+        if hasattr(network, 'Q_like') and hasattr(network, 'Q_prior'):
+            Q_like_D  = network.Q_like.D.detach().cpu().numpy()
+            Q_prior_D = network.Q_prior.D.detach().cpu().numpy()
+        else:
+            Q_like_D  = network.Q_post.D.detach().cpu().numpy()
+            Q_prior_D = np.zeros_like(Q_like_D)
+    Q_like_obj = getattr(network, 'Q_like', None) or network.Q_post
     Q_like_k_nodes = (Q_like_obj._log_k_nodes.exp().detach().cpu().numpy()
-                      if Q_like_obj is not None and hasattr(Q_like_obj, '_log_k_nodes') else None)
+                      if hasattr(Q_like_obj, '_log_k_nodes') else None)
     Q_like_D_nodes = (Q_like_obj.log_D_nodes.exp().detach().cpu().numpy()
-                      if Q_like_obj is not None and hasattr(Q_like_obj, 'log_D_nodes') else None)
+                      if hasattr(Q_like_obj, 'log_D_nodes') else None)
 
     print('Plotting analysis...')
     utils.plot_samples_analysis(
