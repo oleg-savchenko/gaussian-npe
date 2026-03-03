@@ -169,7 +169,7 @@ def main():
         )
 
     # ── Timestamp & output directory ─────────────────────────────────────
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     if args.run_name:
         run_label = f"{timestamp}_{args.run_name}"
     else:

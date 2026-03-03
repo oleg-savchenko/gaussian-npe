@@ -109,7 +109,7 @@ def main():
     # ── Output directory ─────────────────────────────────────────────────
     output_dir = args.output_dir or os.path.join(args.model_dir, 'D_fit')
     os.makedirs(output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     run_name = train_config.get('run_name', 'model')
 
     # ── Device ───────────────────────────────────────────────────────────

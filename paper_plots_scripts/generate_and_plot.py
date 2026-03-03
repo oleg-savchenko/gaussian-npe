@@ -265,7 +265,7 @@ def main():
 
     # Save run config
     run_config = {
-        'timestamp': datetime.now().strftime('%Y%m%d_%H%M%S'),
+        'timestamp': datetime.now().strftime('%y%m%d_%H%M%S'),
         'run_name': run_name,
         'model_dir': os.path.abspath(args.model_dir),
         'target_path': target_path,

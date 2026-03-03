@@ -278,7 +278,7 @@ def main():
                 setattr(args, key, val)
         print(f'[plot_only] Config loaded from {config_path}')
     else:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
         run_label = f"{timestamp}_{args.run_name}" if args.run_name else timestamp
         output_dir = os.path.join(args.output_dir, run_label)
         os.makedirs(output_dir, exist_ok=True)

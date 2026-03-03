@@ -115,7 +115,7 @@ def main():
     utils.configure_matplotlib_style(use_latex=args.use_latex)
 
     # ── Timestamp & output directory ─────────────────────────────────────
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
     suffix = f'LinearWF_{args.run_name}' if args.run_name else 'LinearWF'
     run_label = f'{timestamp}_{suffix}'
     output_dir = os.path.join(args.output_dir, run_label)
