@@ -27,7 +27,7 @@ $$\mathbf{Q}_\theta = \mathbf{Q}^P + \mathbf{Q}^L_\theta$$
 
 The posterior mean (MAP estimate) is computed by a U-Net with periodic (circular) padding:
 
-$$\hat{\boldsymbol{\mu}}_\theta(\mathbf{x}) = \mathbf{H}^\top \left\{ \alpha_\theta(k) \odot \left[ \mathbf{H}\{\mathbf{x}\} + \sigma_{>k_\Lambda}\left(\mathbf{H}\{\text{UNet}_\theta(\mathbf{x})\}\right) \right] \right\}$$
+$$\hat{\boldsymbol{\mu}}_\theta(\mathbf{x}) = \mathbf{H}^\top \left\lbrace \alpha_\theta(k) \odot \left[ \mathbf{H}\lbrace\mathbf{x}\rbrace + \sigma_{>k_\Lambda}\left(\mathbf{H}\lbrace\text{UNet}_\theta(\mathbf{x})\rbrace\right) \right] \right\rbrace$$
 
 where &sigma;_{>k_&Lambda;} is a sigmoidal high-pass filter (default cutoff k_&Lambda; = 0.03 h/Mpc) that lets the U-Net correct only small-scale modes while preserving the large-scale linear relationship.
 
@@ -35,7 +35,7 @@ where &sigma;_{>k_&Lambda;} is a sigmoidal high-pass filter (default cutoff k_&L
 
 Once trained, posterior samples are drawn as:
 
-$$\mathbf{z} = \hat{\boldsymbol{\mu}}_\theta(\mathbf{x}_\text{obs}) + \mathbf{H}^\top \left\{ (D^P + D^L_\theta)^{-1/2} \odot \boldsymbol{\epsilon} \right\}$$
+$$\mathbf{z} = \hat{\boldsymbol{\mu}}_\theta(\mathbf{x}_\text{obs}) + \mathbf{H}^\top \left\lbrace (D^P + D^L_\theta)^{-1/2} \odot \boldsymbol{\epsilon} \right\rbrace$$
 
 where **&epsilon;** is a white noise field. This requires only a single forward pass for the MAP and then trivial element-wise operations per sample.
 
