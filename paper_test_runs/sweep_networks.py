@@ -3,7 +3,7 @@ Sweep over all network architectures for Gaussian NPE training.
 
 Generates and submits one SLURM job per network. All training hyperparameters
 can be overridden via CLI flags; defaults match train.py.
-All run outputs are saved under ./paper_test_runs/runs/.
+All run outputs are saved under ./paper_test_runs/runs/{TIMESTAMP}_sweep_networks/.
 
 Usage:
     python paper_test_runs/sweep_networks.py --dry_run
@@ -31,6 +31,7 @@ Usage:
 import os
 import subprocess
 import argparse
+from datetime import datetime
 
 # ── Networks to sweep ────────────────────────────────────────────────
 # LH (Latin Hypercube) is excluded — it targets a different dataset.
@@ -111,7 +112,7 @@ def main():
     parser.add_argument('--dry_run', action='store_true',
                         help='Print commands without submitting')
     parser.add_argument('--output_dir', type=str, default='paper_test_runs/runs',
-                        help='Base output directory for all runs')
+                        help='Base output directory; runs go to {output_dir}/{timestamp}_sweep_networks/')
 
     # ── SLURM resources ──────────────────────────────────────────────
     parser.add_argument('--cpus_per_task', type=int, default=18,
@@ -148,6 +149,10 @@ def main():
     os.makedirs(jobs_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
 
+    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+    sweep_output_dir = os.path.join(args.output_dir, f'{timestamp}_sweep_networks')
+    print(f'Sweep output dir: {sweep_output_dir}/')
+
     for network in NETWORKS:
         run_name = f'net_{network}'
 
@@ -156,7 +161,10 @@ def main():
             cpus_per_task=args.cpus_per_task,
             time=args.time,
         )
-        script = header + build_train_cmd(run_name, network, args) + '\n'
+        # Pass sweep_output_dir so each run lands in the timestamped sweep folder
+        args_copy = argparse.Namespace(**vars(args))
+        args_copy.output_dir = sweep_output_dir
+        script = header + build_train_cmd(run_name, network, args_copy) + '\n'
 
         script_path = os.path.join(jobs_dir, f'{run_name}.sh')
         with open(script_path, 'w') as f:
@@ -170,7 +178,7 @@ def main():
             subprocess.run(['sbatch', script_path], check=True)
 
     print(f'\nDone. {len(NETWORKS)} jobs {"would be " if args.dry_run else ""}submitted.')
-    print(f'Run outputs will be saved to: {args.output_dir}/')
+    print(f'Run outputs will be saved to: {sweep_output_dir}/')
 
 
 if __name__ == '__main__':

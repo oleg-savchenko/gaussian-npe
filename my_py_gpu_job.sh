@@ -23,12 +23,12 @@ export PYTHONNOUSERSITE=0
 cd /home/osavchenko/gaussian_npe
 
 # python data_scripts/discodj_store.py
-# python scripts/train.py --plot_only --output_dir ./runs/20260301_193604_WienerIsotropicD_test
+# python scripts/train.py --plot_only --output_dir ./runs/20260302_213617_LH_sigma_noise_1_train_only_Q_post
 # python3 scripts/train.py --network UNet_Only --max_epochs 60 --num_samples 100 --run_name UNet_Only_run_optimized
 
-python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.003 --run_name defaultIsotropicD_w_cut_0.003
+python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.003 --sigma_noise 1 --run_name defaultIsotropicD_w_cut_0.003_sigma_noise_1
 
-# python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1_train_only_Q_post
+# python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1_train_only_Q_post_UNet_Only
 
 # python scripts/train.py --network WienerIsotropicD --max_epochs 120 \
 #         --ckpt_path ./runs/20260224_192240_WienerIsotropicD/logs/tb_logs/version_0/checkpoints/epoch=57-step=11600.ckpt

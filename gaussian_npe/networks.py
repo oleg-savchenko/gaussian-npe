@@ -408,8 +408,12 @@ class Gaussian_NPE_LH(Gaussian_NPE_UNet_Only):
     regardless of the prior/likelihood decomposition.
     """
 
-    def __init__(self, box, *args, n_nodes=32, **kwargs):
-        super().__init__(box, *args, **kwargs)
+    def __init__(self, box, prior=None, *args, n_nodes=32, **kwargs):
+        if prior is None:
+            # Build a trivial dummy — it is deleted below, so no CLASS call needed.
+            D_dummy = torch.ones(box.N**3, device=box.k.device)
+            prior = (lambda x: x, D_dummy, lambda x: x)
+        super().__init__(box, prior, *args, **kwargs)
         # Single learned Q_post — no prior/likelihood decomposition.
         self.Q_post = Precision_Matrix_IsotropicNodes(
             self.N, box.k.flatten(), n_nodes=n_nodes,
