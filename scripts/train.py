@@ -23,7 +23,7 @@ Usage:
         --max_epochs 30 \
         --rescaling_factor 0.009908314998484411 \
         --k_cut 0.03 \
-        --w_cut 0.001 \
+        --w_cut 0.003 \
         --sigma_noise 0.1 \
         --n_train 500 \
         --learning_rate 0.01 \
@@ -167,7 +167,7 @@ def parse_args():
         help='Sigmoidal high-pass filter cutoff k [h/Mpc]',
     )
     parser.add_argument(
-        '--w_cut', type=float, default=0.001,
+        '--w_cut', type=float, default=0.003,
         help='Sigmoidal high-pass filter width',
     )
     parser.add_argument(

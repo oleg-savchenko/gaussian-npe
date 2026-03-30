@@ -175,7 +175,7 @@ def main():
     if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet',
                              'IsotropicD', 'WienerIsotropicD', 'Poisson', 'LH'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
-        net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
+        net_kwargs['w_cut'] = train_config.get('w_cut', 0.003)
 
     if network_name == 'Poisson':
         network = NetworkClass(box, prior,

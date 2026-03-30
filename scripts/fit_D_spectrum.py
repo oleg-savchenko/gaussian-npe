@@ -141,7 +141,7 @@ def main():
     )
     if network_name not in ('UNet_Only', 'WienerNet', 'Iterative', 'CustomUNet'):
         net_kwargs['k_cut'] = train_config.get('k_cut', 0.03)
-        net_kwargs['w_cut'] = train_config.get('w_cut', 0.001)
+        net_kwargs['w_cut'] = train_config.get('w_cut', 0.003)
 
     network = NetworkClass(box, prior, **net_kwargs)
     network.float().to(device)

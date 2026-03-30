@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=04:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=./job_outputs/%x-%j-%N_slurm.out
 #SBATCH --error=./job_outputs/R-%x.%j.err
 ## Activate right env
@@ -24,9 +24,10 @@ cd /home/osavchenko/gaussian_npe
 
 # python data_scripts/discodj_store.py
 # python scripts/train.py --plot_only --output_dir ./runs/20260302_213617_LH_sigma_noise_1_train_only_Q_post
-# python3 scripts/train.py --network UNet_Only --max_epochs 60 --num_samples 100 --run_name UNet_Only_run_optimized
+# python3 scripts/train.py --network IsotropicD --max_epochs 5 --num_samples 100 --run_name test_ntrain #--n_train 100
 
-python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.003 --sigma_noise 1 --run_name defaultIsotropicD_w_cut_0.003_sigma_noise_1
+# python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.003 --sigma_noise 1 --run_name defaultIsotropicD_w_cut_0.003_sigma_noise_1
+# python scripts/train.py --network SmoothFilter --max_epochs 70 --sigma_noise 1 --output_dir ./paper_test_runs/runs/260303_224547_sweep_networks
 
 # python scripts/train.py --network LH --store_path /gpfs/scratch1/shared/osavchenko/zarr_stores/Quijote_LH_res128_deconv_MAK --n_train 1990 --sigma_noise 1 --max_epochs 70 --run_name LH_sigma_noise_1_train_only_Q_post_UNet_Only
 
@@ -57,3 +58,10 @@ python scripts/train.py --network default_IsotropicD --max_epochs 70 --w_cut 0.0
 #     --n_bins 40 \
 
 # python paper_test_runs/sweep_networks.py --max_epochs 70 --time 5:00:00
+python paper_test_runs/sweep_train.py --max_epochs 70 --time 5:00:00 --network IsotropicD
+
+# python paper_plots_scripts/save_samples.py \
+#     --model_dir paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD \
+#     --num_samples 10
+
+# python paper_plots_scripts/generate_and_plot.py --model_dir ./paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD --num_samples 1000 --use_latex

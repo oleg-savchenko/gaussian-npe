@@ -170,7 +170,7 @@ class Gaussian_NPE_Network(Gaussian_NPE_Base):
     learnable per-mode scale factors adjust amplitudes in Hartley space.
     """
 
-    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, **kwargs):
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.003, **kwargs):
         super().__init__(box, *args, **kwargs)
         self.k_cut = k_cut
         self.w_cut = w_cut
@@ -251,7 +251,7 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
     sigmoid baseline.
     """
 
-    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, **kwargs):
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.003, **kwargs):
         super().__init__(box, *args, **kwargs)
         self.scale = torch.nn.Parameter(torch.ones(self.N**3))
 
@@ -279,64 +279,49 @@ class Gaussian_NPE_LearnableFilter(Gaussian_NPE_Base):
 
 
 class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
-    """Learnable smooth filter as a function of |k|.
+    """Fully isotropic network: smooth filter, isotropic Q_like, isotropic scale.
 
-    Like LearnableFilter but parameterizes the filter as a smooth function
-    of |k| using learnable logit values at logarithmically-spaced k-nodes
-    with linear interpolation.  This enforces the physical isotropy of the
-    problem (~20 DOF) while being more flexible than the 2-parameter sigmoid.
+    All three learnable spectral components are parameterized on the same
+    n_nodes=32 shell-snapped k-nodes, sharing Q_like's interpolation buffers:
 
-        w(k) = sigmoid(interp(log|k|; logit_nodes))
+        Q_like(|k|) = exp(interp(log|k|; log_D_nodes))      [n_nodes params]
+        w(k)        = sigmoid(interp(log|k|; filter_logit_nodes)) [n_nodes params]
+        scale(|k|)  = exp(interp(log|k|; log_scale_nodes))  [n_nodes params]
 
-    Initialized from the same sigmoid baseline as the default network.
+        mu(x) = G_T(scale(|k|) · G(x + w(|k|) · UNet(x)))
+
+    Node placement uses the snapping approach of Precision_Matrix_IsotropicNodes:
+    log-uniform targets are snapped to actual k-shells to guarantee non-zero
+    gradients.  Filter and scale reuse Q_like._left_idx / _right_idx / _frac —
+    no extra N³ buffers.  Initialized: w from sigmoid baseline, scale=1, D=1.
     """
 
-    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, n_filter_nodes=20, **kwargs):
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.003, n_nodes=32, **kwargs):
         super().__init__(box, *args, **kwargs)
-        self.scale = torch.nn.Parameter(torch.ones(self.N**3))
 
-        k_flat = box.k.flatten()
-        k_shells     = torch.unique(k_flat[k_flat > 0])   # ascending unique shells
-        log_k_shells = k_shells.log()
-        M            = len(k_shells)
+        # Isotropic Q_like (replaces Precision_Matrix_FFT from Base)
+        self.Q_like = Precision_Matrix_IsotropicNodes(
+            self.N, box.k.flatten(), n_nodes=n_nodes,
+        )
+        self.Q_post = Precision_Matrix_Sum(self.Q_like, self.Q_prior)
 
-        # Snap log-uniform targets to actual k-shells (same approach as
-        # Precision_Matrix_IsotropicNodes) so every node always receives
-        # non-zero gradient — no phantom nodes.
-        targets  = torch.linspace(log_k_shells[0], log_k_shells[-1], n_filter_nodes,
-                                  device=k_flat.device)
-        diffs    = (targets.unsqueeze(1) - log_k_shells.unsqueeze(0)).abs()
-        snap_idx = diffs.argmin(dim=1).tolist()
-        for i in range(1, n_filter_nodes):
-            if snap_idx[i] <= snap_idx[i - 1]:
-                snap_idx[i] = snap_idx[i - 1] + 1
-        snap_idx    = torch.tensor(snap_idx, device=k_flat.device).clamp(0, M - 1)
-        log_k_nodes = log_k_shells[snap_idx]              # exactly on real shells
-
-        # Initialize node logits from the sigmoid baseline at each snapped k-node
+        # Initialize filter logits from sigmoid baseline at the snapped k-nodes
         self.filter_logit_nodes = torch.nn.Parameter(
-            (log_k_nodes.exp() - k_cut) / w_cut
+            (self.Q_like._log_k_nodes.exp() - k_cut) / w_cut
         )
 
-        # Precompute interpolation buffers
-        log_k = torch.log(k_flat.clamp(min=float(k_shells[0])))
-        idx   = torch.searchsorted(log_k_nodes, log_k).clamp(1, n_filter_nodes - 1)
-        frac  = ((log_k - log_k_nodes[idx - 1])
-                 / (log_k_nodes[idx] - log_k_nodes[idx - 1])).clamp(0, 1)
-
-        self.register_buffer('_left_idx',  idx - 1)
-        self.register_buffer('_right_idx', idx)
-        self.register_buffer('_frac',      frac)
+        # Isotropic scale (log-scale values at each k-node, initialized to 0 → scale=1)
+        self.log_scale_nodes = torch.nn.Parameter(torch.zeros(n_nodes))
 
     def estimator(self, x):
         p3d = 6 * (20,)
         xx = F.pad(x.unsqueeze(0), p3d, "circular").squeeze(0)
         xx = self.unet(xx.unsqueeze(1)).squeeze(1)
 
-        # Smooth learnable filter (interpolated from ~20 k-nodes)
+        # Isotropic smooth filter (n_nodes logit values, reuses Q_like buffers)
         w = torch.sigmoid(
-            (1 - self._frac) * self.filter_logit_nodes[self._left_idx]
-            +      self._frac  * self.filter_logit_nodes[self._right_idx]
+            (1 - self.Q_like._frac) * self.filter_logit_nodes[self.Q_like._left_idx]
+            +      self.Q_like._frac  * self.filter_logit_nodes[self.Q_like._right_idx]
         )
         xx_h = hartley(xx, dim=self.box.hartley_dim).flatten(-3, -1)   # (B, N³)
         xx_filtered = hartley(
@@ -344,8 +329,13 @@ class Gaussian_NPE_SmoothFilter(Gaussian_NPE_Base):
             dim=self.box.hartley_dim,
         )
 
+        # Isotropic scale (n_nodes log-scale values, reuses Q_like buffers)
+        log_s = ((1 - self.Q_like._frac) * self.log_scale_nodes[self.Q_like._left_idx]
+                 +      self.Q_like._frac  * self.log_scale_nodes[self.Q_like._right_idx])
+        scale = log_s.exp()
+
         x = x + xx_filtered
-        x = self.Q_post.G_T(self.Q_post.G(x) * self.scale)
+        x = self.Q_post.G_T(self.Q_post.G(x) * scale)
         return x - x.mean(dim=(-3, -2, -1), keepdim=True)
 
 
@@ -668,7 +658,7 @@ class Gaussian_NPE_Default_IsotropicD(Gaussian_NPE_Base):
     Initialized: log_scale_nodes = 0 → scale = 1; log_D_nodes = 0 → D = 1.
     """
 
-    def __init__(self, box, *args, k_cut=0.03, w_cut=0.001, n_nodes=32, **kwargs):
+    def __init__(self, box, *args, k_cut=0.03, w_cut=0.003, n_nodes=32, **kwargs):
         super().__init__(box, *args, **kwargs)
         self.k_cut = k_cut
         self.w_cut = w_cut

@@ -20,6 +20,8 @@ plots/
 Quijote_target/
 # data_scripts/
 *.zarr
+df_m_128_PCS_z=127.npy
+group_tab_004.0
 
 # Legacy scripts
 scripts/os250301-Quijote_module_training.py

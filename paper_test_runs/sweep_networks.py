@@ -40,9 +40,9 @@ from datetime import datetime
 NETWORKS = [
     'default',
     'UNet_Only',
-    # 'WienerNet',
-    # 'LearnableFilter',
-    # 'SmoothFilter',
+    'WienerNet',
+    'LearnableFilter',
+    'SmoothFilter',
     # 'Iterative',
     # 'CustomUNet',
     'IsotropicD',

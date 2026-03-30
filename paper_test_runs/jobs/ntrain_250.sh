@@ -4,10 +4,10 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=4:00:00
-#SBATCH --job-name=net_IsotropicD
-#SBATCH --output=paper_test_runs/logs/net_IsotropicD_%j.out
-#SBATCH --error=paper_test_runs/logs/net_IsotropicD_%j.err
+#SBATCH --time=5:00:00
+#SBATCH --job-name=ntrain_250
+#SBATCH --output=paper_test_runs/logs/ntrain_250_%j.out
+#SBATCH --error=paper_test_runs/logs/ntrain_250_%j.err
 
 module load 2024
 module load Python/3.12.3-GCCcore-13.3.0
@@ -15,15 +15,15 @@ export OMP_NUM_THREADS=18
 
 cd /home/osavchenko/gaussian_npe
 python3 scripts/train.py \
-    --run_name net_IsotropicD \
-    --output_dir paper_test_runs/runs/260303_224547_sweep_networks \
+    --run_name ntrain_250 \
+    --output_dir paper_test_runs/runs/260328_234020_sweep_train \
     --network IsotropicD \
-    --max_epochs 50 \
-    --sigma_noise 1.0 \
+    --max_epochs 70 \
+    --sigma_noise 1 \
+    --n_train 250 \
     --learning_rate 0.01 \
     --early_stopping_patience 5 \
     --lr_scheduler_patience 3 \
     --batch_size 8 \
     --num_samples 100 \
-    --noise_seed 42 \
-    --target_path /home/osavchenko/Quijote/Quijote_target/Quijote_sample0_wout_MAK.pt
+    --noise_seed 42

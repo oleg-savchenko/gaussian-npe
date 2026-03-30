@@ -5,9 +5,9 @@
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
 #SBATCH --time=4:00:00
-#SBATCH --job-name=net_UNet_Only
-#SBATCH --output=paper_test_runs/logs/net_UNet_Only_%j.out
-#SBATCH --error=paper_test_runs/logs/net_UNet_Only_%j.err
+#SBATCH --job-name=net_default_IsotropicD
+#SBATCH --output=paper_test_runs/logs/net_default_IsotropicD_%j.out
+#SBATCH --error=paper_test_runs/logs/net_default_IsotropicD_%j.err
 
 module load 2024
 module load Python/3.12.3-GCCcore-13.3.0
@@ -15,9 +15,9 @@ export OMP_NUM_THREADS=18
 
 cd /home/osavchenko/gaussian_npe
 python3 scripts/train.py \
-    --run_name net_UNet_Only \
+    --run_name net_default_IsotropicD \
     --output_dir paper_test_runs/runs/260303_224547_sweep_networks \
-    --network UNet_Only \
+    --network default_IsotropicD \
     --max_epochs 50 \
     --sigma_noise 1.0 \
     --learning_rate 0.01 \

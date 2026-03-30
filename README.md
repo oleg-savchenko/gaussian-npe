@@ -133,7 +133,7 @@ All hyperparameters can be set via command-line flags (see `python scripts/train
 | `--max_epochs` | 30 | Maximum training epochs |
 | `--sigma_noise` | 0.1 | Noise std added to observed field during training |
 | `--k_cut` | 0.03 | High-pass filter cutoff [h/Mpc] |
-| `--w_cut` | 0.001 | High-pass filter width |
+| `--w_cut` | 0.003 | High-pass filter width |
 | `--batch_size` | 8 | Training batch size |
 | `--num_samples` | 100 | Posterior samples for post-training diagnostics |
 
@@ -209,7 +209,3 @@ If you use this code, please cite:
     year={2025}
 }
 ```
-
-## License
-
-See the repository for license information.

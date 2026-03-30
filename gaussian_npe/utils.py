@@ -1181,7 +1181,7 @@ def plot_training_data(store_path, index, box,
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
                                   Q_like_D, Q_prior_D,
                                   save_dir='./plots', run_name='',
-                                  save_csv=False):
+                                  save_csv=False, fmt='png'):
     """Posterior calibration diagnostics in Hartley space.
 
     Produces three figures and a summary text file:
@@ -1287,7 +1287,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, f'log_prob_histogram_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'log_prob_histogram_{run_name}.{fmt}'), bbox_inches='tight')
 
     # ── Figure 2: per-mode chi-squared vs |k| ─────────────────────────────
     chi2_true = D_k * r_true_h**2
@@ -1343,7 +1343,7 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.legend(loc='upper right', fontsize=9)
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, f'chi2_per_k_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'chi2_per_k_{run_name}.{fmt}'), bbox_inches='tight')
 
     # ── Figure 3: true vs predicted Hartley modes ─────────────────────────
     # Stratified mode selection: ~50 per k-bin, ~1000 total
@@ -1390,11 +1390,11 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
             fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
 
     ax.set_xlabel(r'$z_{\rm true}^{(H)}(k)$', fontsize=14)
-    ax.set_ylabel(r'$z_{\rm MAP}^{(H)}(k)$', fontsize=14)
-    ax.set_title(r'True vs predicted Hartley modes ($\pm 2\sigma$)')
+    ax.set_ylabel(r'$z_{\rm pred}^{(H)}(k)$', fontsize=14)
+    ax.set_title(r'True vs predicted Hartley modes')
     ax.grid(alpha=0.15)
     fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, f'hartley_modes_{run_name}.png'), bbox_inches='tight')
+    fig.savefig(os.path.join(save_dir, f'hartley_modes_{run_name}.{fmt}'), bbox_inches='tight')
 
     # ── Optional: save calibration summary ────────────────────────────────────
     if save_csv:
@@ -1514,18 +1514,21 @@ def plot_1pt_pdf_with_skew_kurt(
     # Plot
     fig, ax = plt.subplots(figsize=(6.2, 4.4), dpi=150)
 
-    ax.plot(centers, h_mean_plot, lw=2.0, label=r'$p(z_i\,|\,\mathbf{x}_{\rm obs})$')
-    ax.plot(centers, h_true_plot, lw=2.0, ls='--', color='k', label=r'$p(z^{\rm truth})$')
+    ax.plot(centers, h_mean_plot, lw=2.5, color='forestgreen',
+            label=r'$p(\boldsymbol{z}_i\,|\,\boldsymbol{x}_{\rm obs})$')
+    ax.plot(centers, h_true_plot, lw=2.5, ls='--', color='k',
+            label=r'$p(\boldsymbol{z}_{\rm truth})$')
 
     ax.set_xlim(*xlim)
     ax.set_xlabel(r'$z$')
-    ax.set_ylabel(r'$p(z_i\,|\,\mathbf{x}_{\rm obs})$')
+    ax.set_ylabel(r'$p(\boldsymbol{z}_i\,|\,\boldsymbol{x}_{\rm obs})$')
 
     if title is not None:
         ax.set_title(title)
 
     # Samples annotation (top left)
     txt_samples = (
+        r'$\boldsymbol{x}_{\rm obs}$' + "\n" +
         rf'$\mu = {mu_mean:.1e} \pm {2*mu_std:.1e}$' + "\n" +
         rf'$\sigma = {sig_mean:.3f} \pm {2*sig_std:.1e}$' + "\n" +
         rf'$\gamma_1 = {g1_mean:.1e} \pm {2*g1_std:.1e}$' + "\n" +
@@ -1535,6 +1538,7 @@ def plot_1pt_pdf_with_skew_kurt(
 
     # Truth annotation (top right)
     txt_truth = (
+        r'$\boldsymbol{z}_{\rm truth}$' + "\n" +
         rf'$\mu = {mu_true:.1e}$' + "\n" +
         rf'$\sigma = {sig_true:.3f}$' + "\n" +
         rf'$\gamma_1 = {g1_true:.1e}$' + "\n" +
