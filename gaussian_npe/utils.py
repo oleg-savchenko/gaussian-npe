@@ -1181,7 +1181,8 @@ def plot_training_data(store_path, index, box,
 def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
                                   Q_like_D, Q_prior_D,
                                   save_dir='./plots', run_name='',
-                                  save_csv=False, fmt='png'):
+                                  save_csv=False, fmt='png',
+                                  rescaling_factor=1.0):
     """Posterior calibration diagnostics in Hartley space.
 
     Produces three figures and a summary text file:
@@ -1346,7 +1347,8 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     fig.savefig(os.path.join(save_dir, f'chi2_per_k_{run_name}.{fmt}'), bbox_inches='tight')
 
     # ── Figure 3: true vs predicted Hartley modes ─────────────────────────
-    # Stratified mode selection: ~50 per k-bin, ~1000 total
+    # Stratified mode selection: ~50 per k-bin, topped up to exactly 1000
+    n_modes_plot = 1000
     rng_modes = np.random.default_rng(0)
     k_sel_bins = np.logspace(np.log10(k_F), np.log10(k_Nq), 21)
     selected = []
@@ -1356,10 +1358,16 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
         if n_pick > 0:
             selected.append(rng_modes.choice(in_bin, n_pick, replace=False))
     selected = np.concatenate(selected)
+    # Top up to n_modes_plot if stratified sampling fell short
+    if len(selected) < n_modes_plot:
+        all_idx = np.arange(len(k_modes))
+        remaining = np.setdiff1d(all_idx, selected)
+        n_extra = min(n_modes_plot - len(selected), len(remaining))
+        selected = np.concatenate([selected, rng_modes.choice(remaining, n_extra, replace=False)])
 
-    sel_true = z_true_h[1:][selected]
-    sel_pred = z_MAP_h[1:][selected]
-    sel_sigma = D_k[selected]**-0.5
+    sel_true  = z_true_h[1:][selected]  * rescaling_factor
+    sel_pred  = z_MAP_h[1:][selected]   * rescaling_factor
+    sel_sigma = D_k[selected]**-0.5     * rescaling_factor
     sel_k = k_modes[selected]
 
     within_2sigma = np.abs(sel_true - sel_pred) < 2 * sel_sigma
@@ -1378,20 +1386,19 @@ def plot_calibration_diagnostics(delta_z127, z_MAP, samples, box,
     ax.set_aspect('equal')
 
     cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
-    cbar.set_label(r'$\log_{10}\,k~[h\,{\rm Mpc}^{-1}]$', fontsize=12)
+    cbar.set_label(r'$\log_{10}\,k~[h\,{\rm Mpc}^{-1}]$', fontsize=18)
 
     txt = (
-        f'2$\\sigma$ coverage: {coverage_2sigma:.1%}\n'
-        f'(N modes shown: {len(selected)})\n\n'
-        r'Well-calibrated $\Rightarrow$ ~95% coverage' '\n'
-        'and symmetric scatter around diagonal'
+        f'Modes shown: {len(selected)}\n'
+        f'2$\\sigma$ coverage: {coverage_2sigma*100:.1f}\\%'
+        r' (expected $\approx 95\%$)'
     )
     ax.text(0.03, 0.97, txt, transform=ax.transAxes, va='top', ha='left',
-            fontsize=9, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+            fontsize=13, bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
 
-    ax.set_xlabel(r'$z_{\rm true}^{(H)}(k)$', fontsize=14)
-    ax.set_ylabel(r'$z_{\rm pred}^{(H)}(k)$', fontsize=14)
-    ax.set_title(r'True vs predicted Hartley modes')
+    ax.set_xlabel(r'$z_{\rm true}^{(H)}(k)$', fontsize=21)
+    ax.set_ylabel(r'$z_{\rm pred}^{(H)}(k)$', fontsize=21)
+    ax.set_title(r'True vs predicted Hartley modes', fontsize=21)
     ax.grid(alpha=0.15)
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, f'hartley_modes_{run_name}.{fmt}'), bbox_inches='tight')

@@ -242,8 +242,8 @@ def plot_combined_2pt(delta_z127, delta_z0, samples, z_MAP, box,
                     alpha=0.75, color=color_rs)
     ax.fill_between(k_ff, rs_pks_mean - 2*rs_pks_std, rs_pks_mean + 2*rs_pks_std,
                     alpha=0.25, color=color_rs)
-    ax.plot(k_noise, pk_noise, color='dimgray', lw=0.5, alpha=0.75,
-            label=rf'Noise ($\sigma={sigma_noise}$)')
+    # ax.plot(k_noise, pk_noise, color='dimgray', lw=0.5, alpha=0.75,
+    #         label=rf'Noise ($\sigma={sigma_noise}$)')
     if cosmo_params is not None:
         ax.plot(k_class, pk_class_lin, color='black', lw=0.5, alpha=0.3,
                 label='CLASS linear')
@@ -253,8 +253,7 @@ def plot_combined_2pt(delta_z127, delta_z0, samples, z_MAP, box,
                label=r'$k_{\rm{Nyq}}$')
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8,
-              loc='lower left', bbox_to_anchor=(0, 0.08))
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
     ax.set_ylim(ylim_ic_pk[0] / rescaling_factor**2,
                 ylim_ic_pk[1] / rescaling_factor**2)
     ax.set_xlim(*xlim_ff)

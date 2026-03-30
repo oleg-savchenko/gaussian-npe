@@ -68,10 +68,10 @@ def plot_Q_diagonals(Q_like_D, Q_prior_D, box,
     ax.axvline(x=k_Nq, color='r', linestyle='--', lw=1, label=r'$k_{\rm Nyq}$')
 
     ax.set_xscale('log')
-    ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
-    ax.set_ylabel(r'$D(k)$', fontsize=14)
-    ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
-    leg = ax.legend(loc='upper right', markerscale=8)
+    ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=16)
+    ax.set_ylabel(r'$D(k)$', fontsize=16)
+    ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$', fontsize=16)
+    leg = ax.legend(loc='upper right', markerscale=8, fontsize=13)
     for lh in leg.legend_handles:
         if hasattr(lh, 'set_sizes') and len(lh.get_sizes()) > 0:
             if lh.get_sizes()[0] > 500:
@@ -98,12 +98,13 @@ def main():
     args = parse_args()
     utils.configure_matplotlib_style(use_latex=args.use_latex)
     d = load_model_and_generate_samples(args)
+    rf = d['rescaling_factor']
     plot_Q_diagonals(
-        Q_like_D=d['Q_like_D'],
-        Q_prior_D=d['Q_prior_D'],
+        Q_like_D=d['Q_like_D']  / rf**2,
+        Q_prior_D=d['Q_prior_D'] / rf**2,
         box=d['box'],
         Q_like_k_nodes=d['Q_like_k_nodes'],
-        Q_like_D_nodes=d['Q_like_D_nodes'],
+        Q_like_D_nodes=d['Q_like_D_nodes'] / rf**2 if d['Q_like_D_nodes'] is not None else None,
         save_dir=d['plots_dir'],
         run_name=d['run_name'],
     )

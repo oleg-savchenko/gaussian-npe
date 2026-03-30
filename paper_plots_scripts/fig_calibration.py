@@ -61,6 +61,7 @@ def main():
         run_name=d['run_name'],
         save_csv=args.save_csv,
         fmt='pdf',
+        rescaling_factor=d['rescaling_factor'],
     )
 
     print(f"\nDone. Plots saved to {os.path.join(save_dir, 'calibration')}/")

@@ -31,6 +31,7 @@ import torch
 
 from gaussian_npe import utils, Gaussian_NPE_LH
 from fig2_2pt import plot_summary_stats
+from fig3_1pt import plot_1pt_pdf
 
 BOX_PARAMS = {
     'box_size': 1000.,
@@ -67,6 +68,11 @@ def parse_args():
     parser.add_argument(
         '--output_dir', type=str, default=None,
         help='Where to save the PDF. Defaults to paper_plots_scripts/{run_name}/.',
+    )
+    parser.add_argument(
+        '--ylim_pk', type=float, nargs=2, default=[5e-2, 5],
+        metavar=('YMIN', 'YMAX'),
+        help='Y-axis limits for the P(k) panel.',
     )
     parser.add_argument(
         '--no_latex', dest='use_latex', action='store_false', default=True,
@@ -171,6 +177,12 @@ def main():
     # network.get_z_MAP and network.sample already return physical units
     # (delta_z127 amplitude). plot_summary_stats expects physical units,
     # same as fig2_2pt.py's main() which passes d['_int'] * rf.
+    cosmo_title = (
+        rf'$\Omega_m={sim_params[0]:.4f},\ \Omega_b={sim_params[1]:.4f},\ h={sim_params[2]:.4f}$'
+        '\n'
+        rf'$n_s={sim_params[3]:.4f},\ \sigma_8={sim_params[4]:.4f}$'
+    )
+
     print('Plotting two-point statistics...')
     plot_summary_stats(
         delta_z127=delta_z127,
@@ -183,8 +195,21 @@ def main():
         rescaling_factor=rescaling_factor,
         save_dir=save_dir,
         run_name=run_name,
+        ylim_pk=tuple(args.ylim_pk),
+        title=cosmo_title,
     )
-    print(f'\nDone. Plot saved to {save_dir}/')
+    # ── 1-point PDF ───────────────────────────────────────────────────────
+    # plot_1pt_pdf expects internal units (divided by rescaling_factor)
+    print('Plotting 1-point PDF...')
+    plot_1pt_pdf(
+        delta_z127=delta_z127 / rescaling_factor,
+        samples=samples_arr / rescaling_factor,
+        z_MAP=z_MAP_np / rescaling_factor,
+        save_dir=save_dir,
+        run_name=run_name,
+    )
+
+    print(f'\nDone. Plots saved to {save_dir}/')
 
 
 if __name__ == '__main__':

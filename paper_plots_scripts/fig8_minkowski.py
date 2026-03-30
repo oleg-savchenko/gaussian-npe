@@ -155,22 +155,28 @@ def plot_minkowski_summary(nu, truth, samples, save_dir, run_name):
     ylabels  = [
         r'$V_0$',
         r'$V_1$ [$h/{\rm Mpc}$]',
-        r'$V_2$ [$h^2/{\rm Mpc}^2$]',
-        r'$V_3$ $[({\rm Mpc}/h)^{-3}]$',
+        r'$V_2$ [$(h/{\rm Mpc})^2$]',
+        r'$V_3$ $[(h/{\rm Mpc})^3]$',
     ]
     titles = ['Volume', 'Surface', 'Curvature', 'Euler characteristic']
+    scale_factors = [1, 1e2, 1e4, 1e4]
+    scale_labels  = [None, r'$\times 10^{-2}$', r'$\times 10^{-4}$', r'$\times 10^{-4}$']
 
     fig, axes = plt.subplots(2, 2, figsize=(9.2, 7.0), sharex=True,
                              constrained_layout=True)
     plt.rcParams['figure.facecolor'] = 'white'
+    for ax in axes.flat:
+        ax.tick_params(axis='both', labelsize=14)
 
     for idx, key in enumerate(keys):
         ax = axes.ravel()[idx]
         arr = np.asarray(samples[key], dtype=np.float64)
-        mu  = arr.mean(axis=0)
-        sig = arr.std(axis=0)
+        sc  = scale_factors[idx]
+        mu  = arr.mean(axis=0) * sc
+        sig = arr.std(axis=0)  * sc
+        truth_vals = np.asarray(truth[key], dtype=np.float64) * sc
 
-        ax.plot(nu, np.asarray(truth[key], dtype=np.float64),
+        ax.plot(nu, truth_vals,
                 color='black', lw=1.4, label='True')
         ax.plot(nu, mu, color=color_rs, lw=1.2, label='Re-simulated')
         ax.fill_between(nu, mu - sig,       mu + sig,
@@ -178,13 +184,16 @@ def plot_minkowski_summary(nu, truth, samples, save_dir, run_name):
         ax.fill_between(nu, mu - 2.0 * sig, mu + 2.0 * sig,
                         color=color_rs, alpha=0.16, label=r'$\pm 2\sigma$')
 
-        ax.set_title(titles[idx], fontsize=10)
-        ax.set_ylabel(ylabels[idx])
+        ax.set_title(titles[idx], fontsize=16)
+        ax.set_ylabel(ylabels[idx], fontsize=16)
+        if scale_labels[idx] is not None:
+            ax.text(0.03, 0.97, scale_labels[idx], transform=ax.transAxes,
+                    fontsize=13, va='top', ha='left')
         ax.grid(alpha=0.15)
         if idx >= 2:
-            ax.set_xlabel(r'$\nu = (\delta - \mu)/\sigma$')
+            ax.set_xlabel(r'$\nu = (\delta - \mu)/\sigma$', fontsize=16)
 
-    axes.ravel()[0].legend(framealpha=0.9, fontsize=8, loc='best')
+    axes.ravel()[0].legend(framealpha=0.9, fontsize=14, loc='best')
 
     out = os.path.join(save_dir, f'8_minkowski_{run_name}.pdf')
     fig.savefig(out, bbox_inches='tight')

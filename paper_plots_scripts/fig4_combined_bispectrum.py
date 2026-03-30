@@ -109,6 +109,8 @@ def plot_combined_bispectrum(delta_z127, delta_z0, samples, z_MAP,
     ylim_ic = (-45, 45)
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    for ax in axes.flat:
+        ax.tick_params(axis='both', labelsize=14)
 
     # Share x between rows for θ columns; hide top-row tick labels
     for col in [0, 1]:
@@ -144,12 +146,12 @@ def plot_combined_bispectrum(delta_z127, delta_z0, samples, z_MAP,
                 color='mediumblue', label='True', zorder=10)
         ax.plot(theta_deg, Qk_MAP, color='m', label='MAP', alpha=0.75, lw=2.5)
 
-        ax.set_title(cfg['label'], fontsize=11)
+        ax.set_title(cfg['label'], fontsize=16)
         ax.set_ylim(*ylim_ic)
         ax.grid(alpha=0.15)
-        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=11)
 
-    axes[0, 0].set_ylabel(r'$Q(\theta)$', fontsize=16)
+    axes[0, 0].set_ylabel(r'$Q(\theta)$', fontsize=18)
 
     # Top row, equilateral panel
     ax = axes[0, 2]
@@ -180,11 +182,11 @@ def plot_combined_bispectrum(delta_z127, delta_z0, samples, z_MAP,
             color='mediumblue', label='True', zorder=10)
     ax.plot(k_eq, Qk_eq_MAP, color='m', label='MAP', alpha=0.75, lw=2.5)
 
-    ax.set_title(r'Equilateral: $k_1 = k_2 = k_3 = k$', fontsize=11)
-    ax.set_ylabel(r'$Q(k)$', fontsize=16)
+    ax.set_title(r'Equilateral: $k_1 = k_2 = k_3 = k$', fontsize=16)
+    ax.set_ylabel(r'$Q(k)$', fontsize=18)
     ax.set_xscale('log')
     ax.grid(alpha=0.15)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=11)
 
     # ── Bottom row: re-simulated final fields ─────────────────────────────────
 
@@ -211,12 +213,12 @@ def plot_combined_bispectrum(delta_z127, delta_z0, samples, z_MAP,
                         Qrs_mean - 2 * Qrs_std, Qrs_mean + 2 * Qrs_std,
                         alpha=0.25, color=color_rs)
 
-        ax.set_xlabel(r'$\theta$ [deg]', fontsize=14)
+        ax.set_xlabel(r'$\theta$ [deg]', fontsize=16)
         pass  # autoscale — z=0 Q driven by non-linear structure formation
         ax.grid(alpha=0.15)
-        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=11)
 
-    axes[1, 0].set_ylabel(r'$Q(\theta)$', fontsize=16)
+    axes[1, 0].set_ylabel(r'$Q(\theta)$', fontsize=18)
 
     # Bottom row, equilateral panel
     ax = axes[1, 2]
@@ -241,11 +243,11 @@ def plot_combined_bispectrum(delta_z127, delta_z0, samples, z_MAP,
                     Qrs_eq_mean - 2 * Qrs_eq_std, Qrs_eq_mean + 2 * Qrs_eq_std,
                     alpha=0.25, color=color_rs)
 
-    ax.set_xlabel(r'$k$ [$h/\mathrm{Mpc}$]', fontsize=14)
-    ax.set_ylabel(r'$Q(k)$', fontsize=16)
+    ax.set_xlabel(r'$k$ [$h/\mathrm{Mpc}$]', fontsize=16)
+    ax.set_ylabel(r'$Q(k)$', fontsize=18)
     ax.set_xscale('log')
     ax.grid(alpha=0.15)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=11)
 
     # Row labels via figure text on the left
     fig.text(0.01, 0.75, r'Initial conditions ($z=127$)',

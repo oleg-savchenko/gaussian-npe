@@ -2,8 +2,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
-#SBATCH --gpus=1
-#SBATCH --partition=gpu_a100
+# #SBATCH --gpus=1
+#SBATCH --partition=rome      #gpu_a100
 #SBATCH --time=00:10:00
 #SBATCH --output=./job_outputs/%x-%j-%N_slurm.out
 #SBATCH --error=./job_outputs/R-%x.%j.err
@@ -19,7 +19,7 @@ MODEL_DIR=paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_Is
 
 # python paper_plots_scripts/fig3_1pt.py \
 #     --model_dir $MODEL_DIR \
-#     --num_samples 100
+#     --num_samples 1000
 
 SAMPLES_DIR=/gpfs/scratch1/shared/osavchenko/mnras_paper/samples/260303_224627_net_IsotropicD
 PPC_DIR=$SAMPLES_DIR/sample_0000
@@ -41,7 +41,7 @@ PLOTS_DIR=paper_plots_scripts/260303_224627_net_IsotropicD
 
 # python paper_plots_scripts/fig2_combined_2pt.py \
 #     --model_dir $MODEL_DIR \
-#     --num_samples 10 \
+#     --num_samples 100 \
 #     --samples_dir $SAMPLES_DIR \
 #     --output_dir $PLOTS_DIR
 
@@ -51,13 +51,13 @@ PLOTS_DIR=paper_plots_scripts/260303_224627_net_IsotropicD
 
 # python paper_plots_scripts/fig4_combined_bispectrum.py \
 #     --model_dir $MODEL_DIR \
-#     --num_samples 10 \
+#     --num_samples 100 \
 #     --samples_dir $SAMPLES_DIR \
 #     --output_dir $PLOTS_DIR
 
 # python paper_plots_scripts/fig_calibration.py \
 #     --model_dir $MODEL_DIR \
-#     --num_samples 200 \
+#     --num_samples 100 \
 #     --output_dir $PLOTS_DIR
 
 # python paper_plots_scripts/fig8_minkowski.py \
@@ -69,8 +69,9 @@ PLOTS_DIR=paper_plots_scripts/260303_224627_net_IsotropicD
 # LH_PLOTS_DIR=paper_plots_scripts/260303_195331_LH_sigma_noise_1_train_only_Q_post_UNet_Only
 # python paper_plots_scripts/fig_lh_2pt.py \
 #     --model_dir $LH_MODEL_DIR \
-#     --index 1 \
-#     --num_samples 100 \
+#     --index 6 \
+#     --num_samples 1000 \
+#     --ylim_pk 2e-2 15 \
 #     --output_dir $LH_PLOTS_DIR
 
 python paper_plots_scripts/fig_hmf.py \

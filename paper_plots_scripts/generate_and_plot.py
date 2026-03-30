@@ -321,6 +321,7 @@ def main():
         save_dir=plots_dir,
         run_name=run_name,
         save_csv=True,
+        rescaling_factor=rescaling_factor,
     )
 
     print(f'\nDone. Plots saved to {plots_dir}/')

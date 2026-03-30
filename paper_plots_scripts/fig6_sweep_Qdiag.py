@@ -82,6 +82,13 @@ def _load_Qdiag(model_dir):
     Q_like_D_nodes = (Q_like_obj.log_D_nodes.exp().detach().cpu().numpy()
                       if hasattr(Q_like_obj, 'log_D_nodes') else None)
 
+    # Convert from internal units (z = delta_z127 / rf) to physical units.
+    # D_physical = D_internal / rf^2, since Q_physical = Q_internal / rf^2.
+    Q_like_D  = Q_like_D  / rf**2
+    Q_prior_D = Q_prior_D / rf**2
+    if Q_like_D_nodes is not None:
+        Q_like_D_nodes = Q_like_D_nodes / rf**2
+
     return dict(Q_like_D=Q_like_D, Q_prior_D=Q_prior_D,
                 Q_like_k_nodes=Q_like_k_nodes, Q_like_D_nodes=Q_like_D_nodes,
                 box=box)
@@ -121,7 +128,8 @@ def _radial_bin_mean(k_flat, values, n_bins=80):
     return np.array(k_cen), np.array(v_cen)
 
 
-def _draw_Qdiag_panel(ax, fig, runs, box, cmap, norm, cb_label, cb_ticks):
+def _draw_Qdiag_panel(ax, fig, runs, box, cmap, norm, cb_label, cb_ticks,
+                      show_ylabel=True):
     """Draw one D_like(k) sweep panel onto `ax`.
 
     Parameters
@@ -158,7 +166,7 @@ def _draw_Qdiag_panel(ax, fig, runs, box, cmap, norm, cb_label, cb_ticks):
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, pad=0.02)
-    cbar.set_label(cb_label, fontsize=13)
+    cbar.ax.set_title(cb_label, fontsize=16, pad=12)
     cbar.ax.yaxis.set_major_locator(mticker.FixedLocator(cb_ticks))
     cbar.ax.yaxis.set_minor_locator(mticker.NullLocator())
     cbar.ax.yaxis.set_major_formatter(mticker.FixedFormatter([str(t) for t in cb_ticks]))
@@ -166,7 +174,10 @@ def _draw_Qdiag_panel(ax, fig, runs, box, cmap, norm, cb_label, cb_ticks):
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
-    ax.set_ylabel(r'$D_{\rm like}(k)$', fontsize=14)
+    if show_ylabel:
+        ax.set_ylabel(r'$D_{\rm like}(k)$', fontsize=14)
+    else:
+        ax.tick_params(axis='y', labelleft=True)
     ax.legend(loc='lower left', frameon=True, framealpha=0.9)
     ax.grid(alpha=0.15)
 
@@ -221,10 +232,11 @@ def main():
         d['param'] = sigma
         noise_runs.append(d)
 
+    noise_runs  = [r for r in noise_runs if r['param'] > 0.1]
     noise_vals  = [r['param'] for r in noise_runs]
-    noise_norm  = mcolors.Normalize(vmin=min(noise_vals), vmax=max(noise_vals))
+    noise_norm  = mcolors.Normalize(vmin=0.25, vmax=max(noise_vals))
     noise_cmap  = cm.plasma
-    noise_ticks = [0.1, 0.25, 0.5, 0.75, 1.0]
+    noise_ticks = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
 
     # ── Train sweep (optional) ────────────────────────────────────────────
     train_runs = []
@@ -241,6 +253,7 @@ def main():
     n_panels = 2 if train_runs else 1
     fig, axes = plt.subplots(1, n_panels,
                              figsize=(7 * n_panels, 5),
+                             sharey=True,
                              squeeze=False)
     plt.rcParams['figure.facecolor'] = 'white'
 
@@ -250,7 +263,7 @@ def main():
         cb_label=r'$\sigma_{\rm noise}$',
         cb_ticks=noise_ticks,
     )
-    axes[0, 0].set_title(r'Noise sweep')
+    axes[0, 0].set_title(r'Varying $\sigma_{\rm noise}$', fontsize=16, pad=12)
 
     if train_runs:
         n_vals = [r['param'] for r in train_runs]
@@ -260,8 +273,9 @@ def main():
             cmap=cm.viridis, norm=train_norm,
             cb_label=r'$N_{\rm train}$',
             cb_ticks=[250, 500, 1000, 1500, 2000],
+            show_ylabel=False,
         )
-        axes[0, 1].set_title(r'Training size sweep')
+        axes[0, 1].set_title(r'Varying $N_{\rm train}$', fontsize=16, pad=12)
 
     fig.tight_layout()
 

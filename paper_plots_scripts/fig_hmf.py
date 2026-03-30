@@ -179,27 +179,36 @@ def plot_hmf_summary(
     s2_lo = np.where((mu - 2.0 * sigma) > 0.0, mu - 2.0 * sigma, np.nan)
     s2_hi = np.where((mu + 2.0 * sigma) > 0.0, mu + 2.0 * sigma, np.nan)
 
-    tinker = None if tinker_curve is None else np.asarray(tinker_curve, dtype=np.float64)
-    truth  = None if hmf_truth   is None else np.asarray(hmf_truth,     dtype=np.float64)
+    # Convert from (h/Mpc)^3 to (h/Gpc)^3: multiply by (1000)^3 = 1e9
+    gpc_factor = 1e9
+    mu    *= gpc_factor
+    sigma *= gpc_factor
+    s1_lo = np.where(s1_lo > 0.0, s1_lo * gpc_factor, np.nan)
+    s1_hi = np.where(s1_hi > 0.0, s1_hi * gpc_factor, np.nan)
+    s2_lo = np.where(s2_lo > 0.0, s2_lo * gpc_factor, np.nan)
+    s2_hi = np.where(s2_hi > 0.0, s2_hi * gpc_factor, np.nan)
+
+    tinker = None if tinker_curve is None else np.asarray(tinker_curve, dtype=np.float64) * gpc_factor
+    truth  = None if hmf_truth   is None else np.asarray(hmf_truth,     dtype=np.float64) * gpc_factor
 
     fig, axes = plt.subplots(
-        2, 1, figsize=(6.4, 7.4), sharex=True, constrained_layout=True,
-        gridspec_kw={'height_ratios': [3.0, 1.0]},
+        1, 1, figsize=(6.4, 5.5), constrained_layout=True,
     )
+    axes = [axes]  # keep indexing consistent
 
     # ── Top panel: HMF ───────────────────────────────────────────────────
     ax = axes[0]
     if (mass_resolution_limit is not None
             and np.isfinite(float(mass_resolution_limit))
             and float(mass_resolution_limit) > 0.0):
-        ax.axvspan(float(np.min(m_centers)), float(mass_resolution_limit),
+        ax.axvspan(0.0, float(mass_resolution_limit),
                    color='#efe6e6', alpha=0.85, label='Mass resolution limit', zorder=0)
 
     ax.fill_between(m_centers, s2_lo, s2_hi,
                     color=color_rs, alpha=0.20, lw=0.0, label=r'$\pm 2\sigma$', zorder=1)
     ax.fill_between(m_centers, s1_lo, s1_hi,
                     color=color_rs, alpha=0.40, lw=0.0, label=r'$\pm 1\sigma$', zorder=2)
-    ax.plot(m_centers, mu, color=color_rs, lw=2.0, label='Posterior re-simulations', zorder=3)
+    ax.plot(m_centers, mu, color=color_rs, lw=2.0, label='Posterior resimulations', zorder=3)
 
     if tinker is not None:
         ax.plot(m_centers, tinker, color='0.5', lw=2.0, ls=':', label='Tinker', zorder=4)
@@ -209,41 +218,42 @@ def plot_hmf_summary(
 
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_ylabel(r'$dn/d\log_{10}M\ [(h/{\rm Mpc})^3]$')
+    ax.set_ylabel(r'$dn/d\log_{10}M\ [(h/{\rm Gpc})^3]$')
+    ax.set_xlabel(r'Mass [$M_\odot\,h^{-1}$]')
     ax.grid(alpha=0.25, which='both', ls=':')
     ax.legend(framealpha=0.95, fontsize=9, loc='best')
 
-    # ── Bottom panel: ratio ───────────────────────────────────────────────
-    ax = axes[1]
-    if truth is not None:
-        denom = np.where(truth > 0.0, truth, np.nan)
-        ax.plot(m_centers, np.ones_like(m_centers),
-                color='k', ls='--', lw=1.4, marker='x', ms=5, mew=1.4)
-    elif tinker is not None:
-        denom = np.where(tinker > 0.0, tinker, np.nan)
-        ax.axhline(1.0, color='k', ls='--', lw=1.4)
-    else:
-        denom = np.where(mu > 0.0, mu, np.nan)
-        ax.axhline(1.0, color='k', ls='--', lw=1.4)
-
-    if (mass_resolution_limit is not None
-            and np.isfinite(float(mass_resolution_limit))
-            and float(mass_resolution_limit) > 0.0):
-        ax.axvspan(float(np.min(m_centers)), float(mass_resolution_limit),
-                   color='#efe6e6', alpha=0.85, zorder=0)
-
-    ax.fill_between(m_centers, s2_lo / denom, s2_hi / denom,
-                    color=color_rs, alpha=0.20, lw=0.0, zorder=1)
-    ax.fill_between(m_centers, s1_lo / denom, s1_hi / denom,
-                    color=color_rs, alpha=0.40, lw=0.0, zorder=2)
-    ax.plot(m_centers, mu / denom, color=color_rs, lw=1.8, zorder=3)
-    ax.plot(m_centers, np.ones_like(m_centers), color='0.5', lw=1.6, ls=':', zorder=4)
-
-    ax.set_xscale('log')
-    ax.set_ylim(float(ratio_ymin), float(ratio_ymax))
-    ax.set_ylabel('Ratio')
-    ax.set_xlabel(r'Mass [$M_\odot\,h^{-1}$]')
-    ax.grid(alpha=0.25, which='both', ls=':')
+    # ── Bottom panel: ratio (commented out) ──────────────────────────────
+    # ax = axes[1]
+    # if truth is not None:
+    #     denom = np.where(truth > 0.0, truth, np.nan)
+    #     ax.plot(m_centers, np.ones_like(m_centers),
+    #             color='k', ls='--', lw=1.4, marker='x', ms=5, mew=1.4)
+    # elif tinker is not None:
+    #     denom = np.where(tinker > 0.0, tinker, np.nan)
+    #     ax.axhline(1.0, color='k', ls='--', lw=1.4)
+    # else:
+    #     denom = np.where(mu > 0.0, mu, np.nan)
+    #     ax.axhline(1.0, color='k', ls='--', lw=1.4)
+    #
+    # if (mass_resolution_limit is not None
+    #         and np.isfinite(float(mass_resolution_limit))
+    #         and float(mass_resolution_limit) > 0.0):
+    #     ax.axvspan(0.0, float(mass_resolution_limit),
+    #                color='#efe6e6', alpha=0.85, zorder=0)
+    #
+    # ax.fill_between(m_centers, s2_lo / denom, s2_hi / denom,
+    #                 color=color_rs, alpha=0.20, lw=0.0, zorder=1)
+    # ax.fill_between(m_centers, s1_lo / denom, s1_hi / denom,
+    #                 color=color_rs, alpha=0.40, lw=0.0, zorder=2)
+    # ax.plot(m_centers, mu / denom, color=color_rs, lw=1.8, zorder=3)
+    # ax.plot(m_centers, np.ones_like(m_centers), color='0.5', lw=1.6, ls=':', zorder=4)
+    #
+    # ax.set_xscale('log')
+    # ax.set_ylim(float(ratio_ymin), float(ratio_ymax))
+    # ax.set_ylabel('Ratio')
+    # ax.set_xlabel(r'Mass [$M_\odot\,h^{-1}$]')
+    # ax.grid(alpha=0.25, which='both', ls=':')
 
     os.makedirs(save_dir, exist_ok=True)
     out = os.path.join(save_dir, f'hmf_{run_name}.pdf')

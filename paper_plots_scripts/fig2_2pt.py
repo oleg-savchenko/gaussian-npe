@@ -40,7 +40,8 @@ def _compute_sample_pk(args):
 
 def plot_summary_stats(delta_z127, delta_z0, samples, z_MAP, box,
                        cosmo_params=None, MAS=None, rescaling_factor=1.0,
-                       save_dir='./plots', run_name='', n_workers=None):
+                       save_dir='./plots', run_name='', n_workers=None,
+                       ylim_pk=(5e-2, 5), title=None):
     """Plot P(k), T(k), and C(k) summary statistics (fig 2 of plot_samples_analysis).
 
     Parameters
@@ -113,6 +114,8 @@ def plot_summary_stats(delta_z127, delta_z0, samples, z_MAP, box,
 
     # P(k)
     ax = axs[0]
+    if title is not None:
+        ax.set_title(title, fontsize=11, pad=4)
     ax.plot(k_pylians, pk_ic, marker='.', markersize=0.5, lw=0.5,
             color='mediumblue', label='True', zorder=10)
     if has_samples:
@@ -131,7 +134,7 @@ def plot_summary_stats(delta_z127, delta_z0, samples, z_MAP, box,
     ax.set_yscale('log')
     ax.set_ylabel(r'$P(k)$', fontsize=16)
     ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
-    ax.set_ylim([5e-2, 5])
+    ax.set_ylim(ylim_pk)
     ax.set_xlim(left=k_pylians[0], right=k_Nq + 0.075)
     ax.grid(which='both', alpha=0.125)
 
