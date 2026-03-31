@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 import matplotlib
@@ -53,6 +54,8 @@ QUIJOTE_FIDUCIAL_CLASS = {
     'n_s':       0.9624,
     'sigma8':    0.8340,
 }
+
+RHO_CRIT_H2_MSUN_MPC3 = 2.77536627e11
 
 DEFAULT_ARRAYS_PATH = (
     'paper_plots_scripts/260303_224627_net_IsotropicD/'
@@ -150,6 +153,120 @@ def compute_tinker_from_fiducial_class(
     return dndm * masses * np.log(10.0)
 
 
+# ── Poisson + cosmic-variance helpers ────────────────────────────────────────
+
+def _window_tophat_spherical(x: np.ndarray) -> np.ndarray:
+    """Spherical tophat window W(x)=3(sin x - x cos x)/x^3 with small-x expansion."""
+    x = np.asarray(x, dtype=np.float64)
+    w = np.empty_like(x, dtype=np.float64)
+    small = np.abs(x) < 1.0e-4
+    xs = x[small]
+    # W(x) = 1 - x^2/10 + x^4/280 + O(x^6)
+    w[small] = 1.0 - (xs * xs) / 10.0 + (xs ** 4) / 280.0
+    xm = x[~small]
+    w[~small] = 3.0 * (np.sin(xm) - xm * np.cos(xm)) / (xm ** 3)
+    return w
+
+
+def _sigma_r_from_linear_pk(k: np.ndarray, pk: np.ndarray, radius_mpc_h: float) -> float:
+    """Linear-theory sigma(R) from P(k) using a spherical top-hat window."""
+    k = np.asarray(k, dtype=np.float64)
+    pk = np.asarray(pk, dtype=np.float64)
+    if k.ndim != 1 or pk.ndim != 1 or k.size != pk.size:
+        raise ValueError('k and pk must be 1D arrays of identical length.')
+    if radius_mpc_h <= 0.0:
+        raise ValueError('radius_mpc_h must be > 0.')
+    w = _window_tophat_spherical(k * float(radius_mpc_h))
+    integrand = (k ** 2) * pk * (w ** 2)
+    return float(np.sqrt(np.trapz(integrand, k) / (2.0 * np.pi ** 2)))
+
+
+def _mass_to_radius_mpc_h(mass_msun_h: np.ndarray, omega_m: float) -> np.ndarray:
+    """Convert halo mass [Msun/h] to Lagrangian top-hat radius [Mpc/h]."""
+    mass_msun_h = np.asarray(mass_msun_h, dtype=np.float64)
+    rho_m = float(omega_m) * RHO_CRIT_H2_MSUN_MPC3
+    return ((3.0 * mass_msun_h) / (4.0 * np.pi * rho_m)) ** (1.0 / 3.0)
+
+
+def _st_halo_bias_from_sigma(sigma_m: np.ndarray) -> np.ndarray:
+    """Sheth-Tormen-like large-scale halo bias approximation b(M)."""
+    sigma_m = np.asarray(sigma_m, dtype=np.float64)
+    delta_c = 1.686
+    a = 0.707
+    p = 0.3
+    nu = delta_c / np.maximum(sigma_m, 1.0e-10)
+    anu2 = a * (nu ** 2)
+    return 1.0 + (anu2 - 1.0) / delta_c + (2.0 * p) / (delta_c * (1.0 + anu2 ** p))
+
+
+def _infer_boxsize_from_sample_dirs(sample_dirs: list[str] | None, fallback_boxsize: float) -> float:
+    """Infer boxsize [Mpc/h] from sample metadata when available."""
+    if sample_dirs is None:
+        return float(fallback_boxsize)
+    for out_dir in sample_dirs:
+        meta = os.path.join(str(out_dir), 'metadata.json')
+        if not os.path.isfile(meta):
+            continue
+        try:
+            payload = json.load(open(meta))
+        except Exception:
+            continue
+        if 'boxsize_mpc_over_h' in payload:
+            try:
+                return float(payload['boxsize_mpc_over_h'])
+            except Exception:
+                pass
+    return float(fallback_boxsize)
+
+
+def compute_poisson_plus_cosmic_variance_band(
+    *,
+    mass_centers: np.ndarray,
+    log_edges: np.ndarray,
+    reference_hmf: np.ndarray,
+    boxsize_mpc_h: float,
+    omega_m: float,
+    k: np.ndarray | None,
+    pk: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build a 1σ band around a reference HMF using:
+      (σ_n / n)^2 ≈ 1/N_bin + [b(M) σ_V]^2.
+
+    If (k, pk) is None, falls back to Poisson-only.
+    """
+    m = np.asarray(mass_centers, dtype=np.float64)
+    edges = np.asarray(log_edges, dtype=np.float64)
+    ref = np.asarray(reference_hmf, dtype=np.float64)
+    if m.ndim != 1 or ref.ndim != 1 or m.size != ref.size:
+        raise ValueError('mass_centers and reference_hmf must be 1D with identical shape.')
+    if edges.ndim != 1 or edges.size != (m.size + 1):
+        raise ValueError('log_edges must have length len(mass_centers)+1.')
+
+    dlogm = np.diff(edges)
+    volume = float(boxsize_mpc_h) ** 3
+    n_bin = ref * volume * dlogm
+    n_bin = np.where(n_bin > 0.0, n_bin, np.nan)
+    rel_poisson = 1.0 / np.sqrt(n_bin)
+
+    if (k is not None) and (pk is not None):
+        r_mass = _mass_to_radius_mpc_h(m, omega_m=float(omega_m))
+        sigma_m = np.asarray([_sigma_r_from_linear_pk(k, pk, float(r)) for r in r_mass], dtype=np.float64)
+        b_m = _st_halo_bias_from_sigma(sigma_m)
+        r_box_eff = (3.0 * volume / (4.0 * np.pi)) ** (1.0 / 3.0)
+        sigma_v = _sigma_r_from_linear_pk(k, pk, float(r_box_eff))
+        rel_sample = b_m * float(sigma_v)
+    else:
+        rel_sample = np.zeros_like(rel_poisson)
+
+    rel_tot = np.sqrt(rel_poisson ** 2 + rel_sample ** 2)
+    lo = ref * (1.0 - rel_tot)
+    hi = ref * (1.0 + rel_tot)
+    lo = np.where(np.isfinite(lo) & (lo > 0.0), lo, np.nan)
+    hi = np.where(np.isfinite(hi) & (hi > 0.0), hi, np.nan)
+    return lo, hi
+
+
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot_hmf_summary(
@@ -159,6 +276,7 @@ def plot_hmf_summary(
     tinker_curve: np.ndarray | None,
     hmf_truth: np.ndarray | None,
     mass_resolution_limit: float | None,
+    comic_variance_band: tuple[np.ndarray, np.ndarray] | None,
     save_dir: str,
     run_name: str,
     ratio_ymin: float,
@@ -190,6 +308,13 @@ def plot_hmf_summary(
 
     tinker = None if tinker_curve is None else np.asarray(tinker_curve, dtype=np.float64) * gpc_factor
     truth  = None if hmf_truth   is None else np.asarray(hmf_truth,     dtype=np.float64) * gpc_factor
+    comic_band = None
+    if comic_variance_band is not None:
+        lo, hi = comic_variance_band
+        comic_band = (
+            np.asarray(lo, dtype=np.float64) * gpc_factor,
+            np.asarray(hi, dtype=np.float64) * gpc_factor,
+        )
 
     fig, axes = plt.subplots(
         1, 1, figsize=(6.4, 5.5), constrained_layout=True,
@@ -204,24 +329,55 @@ def plot_hmf_summary(
         ax.axvspan(0.0, float(mass_resolution_limit),
                    color='#efe6e6', alpha=0.85, label='Mass resolution limit', zorder=0)
 
+    if comic_band is not None:
+        ax.fill_between(
+            m_centers,
+            comic_band[0],
+            comic_band[1],
+            color='0.6',
+            alpha=0.25,
+            lw=0.0,
+            label='Poisson + cosmic variance',
+            zorder=1,
+        )
+
     ax.fill_between(m_centers, s2_lo, s2_hi,
-                    color=color_rs, alpha=0.20, lw=0.0, label=r'$\pm 2\sigma$', zorder=1)
+                    color=color_rs, alpha=0.20, lw=0.0, label=r'$\pm 2\sigma$', zorder=2)
     ax.fill_between(m_centers, s1_lo, s1_hi,
-                    color=color_rs, alpha=0.40, lw=0.0, label=r'$\pm 1\sigma$', zorder=2)
-    ax.plot(m_centers, mu, color=color_rs, lw=2.0, label='Posterior resimulations', zorder=3)
+                    color=color_rs, alpha=0.40, lw=0.0, label=r'$\pm 1\sigma$', zorder=3)
+    ax.plot(m_centers, mu, color=color_rs, lw=2.0, label='Posterior resimulations', zorder=4)
 
     if tinker is not None:
-        ax.plot(m_centers, tinker, color='0.5', lw=2.0, ls=':', label='Tinker', zorder=4)
+        ax.plot(m_centers, tinker, color='0.5', lw=2.0, ls=':', label='Tinker', zorder=5)
     if truth is not None:
         ax.plot(m_centers, truth, color='k', ls='--', lw=1.8,
-                marker='x', ms=6, mew=1.6, label='Ground truth', zorder=5)
+                marker='x', ms=6, mew=1.6, label='Ground truth', zorder=6)
 
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_ylabel(r'$dn/d\log_{10}M\ [(h/{\rm Gpc})^3]$')
-    ax.set_xlabel(r'Mass [$M_\odot\,h^{-1}$]')
+    ax.set_ylabel(r'$dn/d\log_{10}M\ [(h/{\rm Gpc})^3]$', fontsize=16)
+    ax.set_xlabel(r'Mass [$M_\odot\,h^{-1}$]', fontsize=16)
+    ax.tick_params(labelsize=16)
     ax.grid(alpha=0.25, which='both', ls=':')
-    ax.legend(framealpha=0.95, fontsize=9, loc='best')
+
+    # Reorder legend: Ground truth, Posterior resimulations, 1σ, 2σ, Mass resolution limit
+    handles, labels = ax.get_legend_handles_labels()
+    order = ['Ground truth', 'Posterior resimulations',
+             r'$\pm 1\sigma$', r'$\pm 2\sigma$', 'Poisson + cosmic variance',
+             'Mass resolution limit', 'Tinker']
+    label_to_handle = dict(zip(labels, handles))
+    ordered_handles = [label_to_handle[l] for l in order if l in label_to_handle]
+    ordered_labels  = [l for l in order if l in label_to_handle]
+    ax.legend(
+        ordered_handles,
+        ordered_labels,
+        framealpha=0.95,
+        fontsize=16,
+        loc='best',
+        # Restrict the "best" search box to start 5% from the left edge.
+        bbox_to_anchor=(0.05, 0.0, 0.95, 1.0),
+        bbox_transform=ax.transAxes,
+    )
 
     # ── Bottom panel: ratio (commented out) ──────────────────────────────
     # ax = axes[1]
@@ -294,6 +450,20 @@ def parse_args():
         help='Overlay Tinker HMF (from arrays or computed from CLASS).',
     )
     parser.add_argument(
+        '--plot_comic_variance', dest='plot_comic_variance',
+        action=argparse.BooleanOptionalAction, default=False,
+        help='Overlay a semi-transparent gray 1σ band from Poisson + cosmic variance estimate.',
+    )
+    # Alias with corrected spelling; kept hidden to preserve requested CLI flag.
+    parser.add_argument(
+        '--plot_cosmic_variance', dest='plot_comic_variance',
+        action=argparse.BooleanOptionalAction, help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--cv_boxsize_mpc_h', type=float, default=1000.0,
+        help='Fallback box size [Mpc/h] used in cosmic-variance estimate when metadata is unavailable.',
+    )
+    parser.add_argument(
         '--class_pk_table_path', type=str, default=None,
         help='Optional CLASS linear P(k) table path. Computes Tinker HMF and overrides any existing hmf_tinker.',
     )
@@ -345,23 +515,31 @@ def main():
 
     data = np.load(arrays_path)
 
-    required = ('hmf_mass_centers', 'hmf_samples', 'mass_resolution_limit')
-    missing = [k for k in required if k not in data.files]
-    if missing:
-        raise KeyError(f'Missing required keys in {arrays_path}: {missing}')
+    def _resolve(keys):
+        """Return the value of the first key found in data, or raise."""
+        for k in keys:
+            if k in data.files:
+                return np.asarray(data[k], dtype=np.float64)
+        raise KeyError(f'None of {keys} found in {arrays_path}. Available: {data.files}')
 
-    m_centers            = np.asarray(data['hmf_mass_centers'],      dtype=np.float64)
-    hmf_samples          = np.asarray(data['hmf_samples'],           dtype=np.float64)
-    mass_resolution_limit = float(np.asarray(data['mass_resolution_limit'], dtype=np.float64))
+    def _optional(*keys):
+        for k in keys:
+            if k in data.files:
+                arr = np.asarray(data[k], dtype=np.float64)
+                return arr if arr.size > 0 else None
+        return None
 
-    def _optional(key):
-        if key not in data.files:
-            return None
-        arr = np.asarray(data[key], dtype=np.float64)
-        return arr if arr.size > 0 else None
+    m_centers             = _resolve(['hmf_mass_centers', 'posterior_hmf_mass_centers'])
+    hmf_log_edges         = _resolve(['hmf_log_edges',    'posterior_hmf_log_edges'])
+    hmf_samples           = _resolve(['hmf_samples',      'posterior_hmf_samples'])
+    mass_resolution_limit = float(_resolve(['mass_resolution_limit']))
+    sample_output_dirs_arr = data['sample_output_dirs'] if 'sample_output_dirs' in data.files else None
+    sample_output_dirs = None
+    if sample_output_dirs_arr is not None:
+        sample_output_dirs = [str(x) for x in np.asarray(sample_output_dirs_arr).tolist()]
 
-    hmf_truth  = _optional('hmf_truth')  if args.show_truth  else None
-    hmf_tinker = _optional('hmf_tinker') if args.show_tinker else None
+    hmf_truth  = _optional('hmf_truth',  'truth_emulated_hmf',        'posterior_hmf_original_truth') if args.show_truth  else None
+    hmf_tinker = _optional('hmf_tinker', 'posterior_hmf_tinker') if args.show_tinker else None
 
     # ── Optionally recompute Tinker ───────────────────────────────────────
     if args.class_pk_table_path is not None and args.build_class_pk_fiducial:
@@ -398,6 +576,48 @@ def main():
     if hmf_tinker is not None and hmf_tinker.shape != m_centers.shape:
         raise ValueError(f'hmf_tinker shape mismatch: {hmf_tinker.shape} vs {m_centers.shape}')
 
+    # ── Optional Poisson + cosmic-variance band ─────────────────────────
+    comic_variance_band = None
+    if args.plot_comic_variance:
+        ref_for_cv = hmf_truth if hmf_truth is not None else np.nanmean(hmf_samples, axis=0)
+        ref_for_cv = np.asarray(ref_for_cv, dtype=np.float64)
+
+        boxsize_cv = _infer_boxsize_from_sample_dirs(
+            sample_dirs=sample_output_dirs,
+            fallback_boxsize=float(args.cv_boxsize_mpc_h),
+        )
+        print(f'Comic-variance band: using boxsize={boxsize_cv:.3f} Mpc/h')
+
+        k_cv = None
+        pk_cv = None
+        if args.class_pk_table_path is not None:
+            table = np.loadtxt(os.path.abspath(args.class_pk_table_path))
+            if table.ndim == 2 and table.shape[1] >= 2:
+                k_cv = np.asarray(table[:, 0], dtype=np.float64)
+                pk_cv = np.asarray(table[:, 1], dtype=np.float64)
+                print('Comic-variance band: using CLASS P(k) from --class_pk_table_path')
+        else:
+            try:
+                k_cv, pk_cv = _build_fiducial_class_pk(
+                    z=args.class_z,
+                    kmin=args.class_kmin,
+                    kmax=args.class_kmax,
+                    n_modes=args.class_n_modes,
+                )
+                print('Comic-variance band: using on-the-fly fiducial CLASS P(k)')
+            except Exception as exc:
+                print(f'Comic-variance band: CLASS unavailable ({exc!r}); falling back to Poisson-only.')
+
+        comic_variance_band = compute_poisson_plus_cosmic_variance_band(
+            mass_centers=m_centers,
+            log_edges=hmf_log_edges,
+            reference_hmf=ref_for_cv,
+            boxsize_mpc_h=float(boxsize_cv),
+            omega_m=float(args.omega_m),
+            k=k_cv,
+            pk=pk_cv,
+        )
+
     # ── Plot ──────────────────────────────────────────────────────────────
     plot_hmf_summary(
         m_centers=m_centers,
@@ -405,6 +625,7 @@ def main():
         tinker_curve=hmf_tinker,
         hmf_truth=hmf_truth,
         mass_resolution_limit=mass_resolution_limit,
+        comic_variance_band=comic_variance_band,
         save_dir=save_dir,
         run_name=run_name,
         ratio_ymin=args.ratio_ymin,

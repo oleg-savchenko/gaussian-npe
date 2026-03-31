@@ -4,7 +4,7 @@ Field slice visualisations of posterior samples vs true ICs.
 Produces one figure saved to paper_plots_scripts/{RUN_NAME}/:
   - 4_field_slices_{RUN_NAME}.pdf : 2×3 grid
         [0,0] True initial IC   [0,1] IC Sample 1    [0,2] True final (z=0)
-        [1,0] MAP               [1,1] IC Sample 2    [1,2] Re-simulated (z=0)
+        [1,0] MAP               [1,1] IC Sample 2    [1,2] Resimulated (z=0)
 
     IC panels  : seismic cmap, ×1e2 scaling, vmin/vmax = [-2, 2].
     Final panels: inferno cmap, vmin=-0.5, vmax=2.5.
@@ -12,11 +12,11 @@ Produces one figure saved to paper_plots_scripts/{RUN_NAME}/:
 
 Usage:
     # First run — loads model, generates/saves z_MAP.npy, loads 2 IC samples
-    # and the re-simulated field from the ppc pipeline:
+    # and the resimulated field from the ppc pipeline:
     python paper_plots_scripts/fig1_slices.py \\
         --model_dir paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD \\
         --samples_dir /gpfs/scratch1/shared/osavchenko/mnras_paper/samples/260303_224627_net_IsotropicD \\
-        --ppc_dir /gpfs/scratch1/shared/osavchenko/mnras_paper/samples/260303_224627_net_IsotropicD/sample_0000 \\
+        --ppc_dir /gpfs/scratch1/shared/osavchenko/mnras_paper/samples/260303_224627_net_IsotropicD/sample_0001 \\
         --num_samples 2
 
     # After z_MAP.npy is saved to samples_dir: comment out the model-loading
@@ -45,7 +45,7 @@ def plot_field_slices(delta_z127, delta_z0, samples, z_MAP, emu_delta_z0,
     delta_z0   : ndarray (N,N,N)   True final field (z=0), δ units.
     samples    : list of 2 ndarrays (N,N,N)  IC posterior samples, physical units.
     z_MAP      : ndarray (N,N,N)   MAP IC estimate, physical units.
-    emu_delta_z0 : ndarray (N,N,N) or None  Re-simulated z=0 field; if None the
+    emu_delta_z0 : ndarray (N,N,N) or None  Resimulated z=0 field; if None the
                    panel is left blank.
     save_dir   : str
     run_name   : str
@@ -120,7 +120,7 @@ def plot_field_slices(delta_z127, delta_z0, samples, z_MAP, emu_delta_z0,
     axes[0, 2].set_yticklabels([])
     plt.colorbar(im_ff, ax=axes[0, 2], pad=0.006, aspect=30)
 
-    # ── [1,2] Re-simulated final (z=0) ────────────────────────────────────
+    # ── [1,2] Resimulated final (z=0) ────────────────────────────────────
     if emu_delta_z0 is not None:
         im_rs = axes[1, 2].imshow(ff_slice(emu_delta_z0), origin='lower',
                                    cmap='inferno', vmin=vmin_ff, vmax=vmax_ff,
@@ -128,7 +128,7 @@ def plot_field_slices(delta_z127, delta_z0, samples, z_MAP, emu_delta_z0,
         plt.colorbar(im_rs, ax=axes[1, 2], pad=0.006, aspect=30)
     else:
         axes[1, 2].set_visible(False)
-    axes[1, 2].set_title(r'Re-simulated', fontsize=22)
+    axes[1, 2].set_title(r'Resimulated', fontsize=22)
     axes[1, 2].set_yticklabels([])
     axes[1, 2].set_xlabel(label_mpc, fontsize=14)
 
@@ -153,7 +153,8 @@ def parse_args():
     parser.add_argument(
         '--ppc_dir', type=str, default=None,
         help='Path to a sample_XXXX/ folder from the ppc pipeline. '
-             'Loads emu_delta_z0.npy for the re-simulated panel.',
+             'Loads emu_delta_z0.npy for the resimulated panel. '
+             'Should point to sample_0001 so the resimulation matches the bottom-centre IC panel.',
     )
     return parser.parse_args()
 
@@ -202,8 +203,8 @@ def main():
             f for f in os.listdir(args.samples_dir)
             if f.startswith('sample_') and f.endswith('.npy')
         ])
-        # skip sample_0000; load the next num_samples files as Sample 1, Sample 2, ...
-        sample_files = sample_files[1:1 + args.num_samples]
+        # load sample_0000 (top-centre) and sample_0001 (bottom-centre)
+        sample_files = sample_files[0:args.num_samples]
         samples = (
             [np.load(os.path.join(args.samples_dir, f)) for f in sample_files]
             if sample_files else None
@@ -212,13 +213,13 @@ def main():
     else:
         samples = None
 
-    # ── Load re-simulated field ───────────────────────────────────────────
+    # ── Load resimulated field ───────────────────────────────────────────
     emu_delta_z0 = None
     if args.ppc_dir:
         emu_path = os.path.join(args.ppc_dir, 'emu_delta_z0.npy')
         if os.path.exists(emu_path):
             emu_delta_z0 = np.load(emu_path)
-            print(f'Loaded re-simulated field from {emu_path}')
+            print(f'Loaded resimulated field from {emu_path}')
         else:
             print(f'Warning: emu_delta_z0.npy not found in {args.ppc_dir}')
 

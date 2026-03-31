@@ -3,7 +3,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
 # #SBATCH --gpus=1
-#SBATCH --partition=rome      #gpu_a100
+#SBATCH --partition=rome      #gpu_a100         #
 #SBATCH --time=00:10:00
 #SBATCH --output=./job_outputs/%x-%j-%N_slurm.out
 #SBATCH --error=./job_outputs/R-%x.%j.err
@@ -74,9 +74,9 @@ PLOTS_DIR=paper_plots_scripts/260303_224627_net_IsotropicD
 #     --ylim_pk 2e-2 15 \
 #     --output_dir $LH_PLOTS_DIR
 
-python paper_plots_scripts/fig_hmf.py \
-    --arrays_path $PLOTS_DIR/posterior_resimulation/posterior_predictive_hmf_arrays.npz \
-    --output_dir $PLOTS_DIR
+# python paper_plots_scripts/fig_hmf.py \
+#     --arrays_path $PLOTS_DIR/posterior_resimulation/posterior_predictive_hmf_arrays.npz \
+#     --output_dir $PLOTS_DIR
 
 # python paper_plots_scripts/fig5_Qdiag.py \
 #     --model_dir $MODEL_DIR
@@ -85,3 +85,16 @@ python paper_plots_scripts/fig_hmf.py \
 #     --sweep_dir      paper_test_runs/runs/260304_233941_sweep_noise \
 #     --sweep_train_dir paper_test_runs/runs/260328_234020_sweep_train \
 #     --output_dir $PLOTS_DIR
+
+python paper_plots_scripts/fig_hmf.py \
+    --arrays_path paper_plots_scripts/260303_224627_net_IsotropicD/true_ic_forward_apples_to_apples/posterior_predictive_hmf_apples_to_apples_true_ic_comparison_arrays.npz \
+    --output_dir paper_plots_scripts/260303_224627_net_IsotropicD/true_ic_forward_apples_to_apples \
+    --build_class_pk_fiducial \
+    # --plot_comic_variance
+
+# python paper_plots_scripts/fig_pk_individual_samples.py \
+#     --model_dir paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD \
+#     --num_samples 10 \
+#     --samples_dir /gpfs/scratch1/shared/osavchenko/mnras_paper/samples/260303_224627_net_IsotropicD \
+#     --output_dir paper_plots_scripts/260303_224627_net_IsotropicD \
+#     --num_ppc_samples 10
