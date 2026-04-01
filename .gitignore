@@ -30,6 +30,9 @@ scripts/os250301-Quijote_module_training.py
 text_files/
 scratch.txt
 
+# Claude Code
+CLAUDE.md
+
 # Python
 __pycache__/
 *.pyc
