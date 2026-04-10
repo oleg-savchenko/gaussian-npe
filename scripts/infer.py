@@ -316,7 +316,6 @@ def main():
         save_dir=plots_dir,
         run_name=run_label,
         save_csv=True,
-        rescaling_factor=rescaling_factor,
     )
     print(f'Plots saved to {plots_dir}')
     plt.close('all')

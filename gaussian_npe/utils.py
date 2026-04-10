@@ -475,371 +475,55 @@ def fit_D_spectrum(k_flat, D_like, D_prior=None, n_bins=40, k_min=None, k_max=No
     return popt, perr, D_fit_func, k_bins, D_like_means, D_like_stds, D_prior_means, N_modes
 
 
-def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
-                          cosmo_params=None, MAS=None,
-                          Q_like_D=None, Q_prior_D=None,
-                          Q_like_k_nodes=None, Q_like_D_nodes=None,
-                          save_dir='./plots', run_name='',
-                          save_csv=False, n_workers=None):
-    """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
+# ── Plot samples analysis ─────────────────────────────────────────────────────
 
-    When ``samples`` is None or empty, all figures are produced in MAP-only mode:
-    sample uncertainty bands are omitted, and the MAP estimate is used wherever
-    a representative field is needed (field slice, 1pt PDF, bispectrum).
 
-    Produces up to six figures:
-      1. 1-point PDF of truth vs samples (or MAP) with skewness and kurtosis annotations.
-      2. Summary statistics: power spectrum, transfer function, and cross-correlation
-         of the MAP estimate (and samples when available) relative to the ground truth.
-      3. Reduced bispectrum Q(theta) of truth vs samples (or MAP), always with MAP line.
-      4. Field slices: true IC, one posterior sample (or MAP), and residual (3x3 grid).
-      5. Truth vs MAP vs posterior std (or MAP residual when no samples) (1x3).
-      6. Precision matrix diagonals D_like, D_prior, D_posterior vs k (if provided).
+def plot_1pt_pdf(delta_z127, samples, z_MAP,
+                 save_dir='./plots', run_name='', save_csv=False):
+    """1-point PDF with skewness & kurtosis annotations.
+
+    Compares the 1-point distribution of the true IC field against the
+    posterior samples (or MAP in MAP-only mode).  Saves
+    ``1_1pt_pdf_{run_name}.png`` and, when ``save_csv=True``, writes
+    ``diagnostics/scalars_samples_{run_name}.csv`` and
+    ``diagnostics/samples_summary_{run_name}.txt``.
 
     Parameters
     ----------
     delta_z127 : np.ndarray, shape (N, N, N)
-        True initial conditions field (float32).
-    delta_z0 : np.ndarray, shape (N, N, N)
-        Observed final conditions field (float32).
-    samples : np.ndarray, shape (n_samples, N, N, N)
-        Posterior samples (float32).
-    z_MAP : np.ndarray, shape (N, N, N)
-        MAP estimate of the initial conditions (float32).
-    box : Power_Spectrum_Sampler
-        Box object (used for k-grid info and power spectrum computation).
-    cosmo_params : dict, optional
-        Cosmological parameters for CLASS. If provided, the linear theory P(k) is shown.
-    MAS : str, optional
-        Mass assignment scheme for Pylians (e.g. 'PCS'). Default None (no correction).
-    Q_like_D : np.ndarray, shape (N^3,), optional
-        Diagonal of the likelihood precision matrix. If provided together with
-        Q_prior_D, an additional Q-matrix diagnostic plot is produced.
-    Q_prior_D : np.ndarray, shape (N^3,), optional
-        Diagonal of the prior precision matrix.
-    save_dir : str
-        Directory to save the output plots.
-    run_name : str
-        Suffix appended to filenames.
+    samples    : np.ndarray, shape (n_samples, N, N, N), or None
+    z_MAP      : np.ndarray, shape (N, N, N)
+    save_dir   : str
+    run_name   : str
+    save_csv   : bool
     """
     os.makedirs(save_dir, exist_ok=True)
-
     plt.rcParams['figure.facecolor'] = 'white'
 
     delta_z127 = delta_z127.astype('f')
-    delta_z0 = delta_z0.astype('f')
-    z_MAP = z_MAP.astype('f')
-
-    N = delta_z127.shape[0]
-    color_samples = 'forestgreen'
+    z_MAP      = z_MAP.astype('f')
 
     has_samples = samples is not None and np.asarray(samples).size > 0
     if has_samples:
         samples = np.asarray(samples).astype('f')
-        sample = samples[0]
-        std = samples.std(axis=0)
-        residual = sample - delta_z127
-    else:
-        samples = None
-        sample = z_MAP
-        std = None
-        residual = z_MAP - delta_z127
 
-    # ── Figure 1: 1-point PDF with skewness & kurtosis ───────────────────
     fields_for_pdf = samples if has_samples else z_MAP[np.newaxis]
-    fig, ax = plot_1pt_pdf_with_skew_kurt(delta_z127, fields_for_pdf)
+    fig, _ax = plot_1pt_pdf_with_skew_kurt(delta_z127, fields_for_pdf)
     fig.savefig(os.path.join(save_dir, f'1_1pt_pdf_{run_name}.png'), bbox_inches='tight')
     plt.close(fig)
 
-    # ── Compute summary statistics ────────────────────────────────────────
-    k_Nq = box.k_Nq
-
-    # XPk gives auto-spectra of both fields and cross-spectrum in one pass
-    Pk_MAP = PKL.XPk([z_MAP, delta_z127], box.box_size, axis=0,
-                      MAS=[MAS, MAS], threads=1)
-    k_pylians = Pk_MAP.k3D
-    pk_MAP    = Pk_MAP.Pk[:, 0, 0]
-    pk_ic     = Pk_MAP.Pk[:, 0, 1]
-    tk_MAP    = np.sqrt(pk_MAP / pk_ic)
-    xpk_MAP   = Pk_MAP.XPk[:, 0, 0] / np.sqrt(pk_MAP * pk_ic)
-
-    # Cross-correlation between IC and final field (linear baseline)
-    Pk_lin = PKL.XPk([delta_z127, delta_z0], box.box_size, axis=0,
-                      MAS=[MAS, MAS], threads=1)
-    xpk_linear = Pk_lin.XPk[:, 0, 0] / np.sqrt(Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])
-
-    # Samples P(k), T(k), C(k) — parallelised over samples (skipped in MAP-only mode)
-    if has_samples:
-        pk_args = [(samples[i], delta_z127, box.box_size, MAS) for i in range(len(samples))]
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            pk_results = list(executor.map(_compute_sample_pk, pk_args))
-        pks  = np.array([r[0] for r in pk_results])
-        xpks = np.array([r[1] for r in pk_results])
-        tks  = np.sqrt(pks / pk_ic)
-        pks_mean,  pks_std  = pks.mean(0),  pks.std(0)
-        tks_mean,  tks_std  = tks.mean(0),  tks.std(0)
-        xpks_mean, xpks_std = xpks.mean(0), xpks.std(0)
-    else:
-        pks = xpks = tks = None
-
-    # Optional: linear theory P(k) from CLASS
-    if cosmo_params is not None:
-        k_lin = np.logspace(np.log10(1e-4), np.log10(10), 100)
-        pk_class_z0 = get_pk_class(cosmo_params, 0, k_lin)
-
-    # ── Figure 2: summary statistics ──────────────────────────────────────
-    fig, axs = plt.subplots(3, sharex=True, sharey=False, height_ratios=[2, 1, 1])
-    fig.set_size_inches(4, 8)
-
-    # ── P(k) ──
-    ax = axs[0]
-    ax.plot(k_pylians, pk_ic, marker='.', markersize=0.5, lw=0.5,
-            label='True', zorder=10)
-    if has_samples:
-        ax.plot(k_pylians, pks_mean, lw=0.5, color=color_samples, label='Samples')
-        ax.fill_between(k_pylians,
-                         pks_mean - pks_std, pks_mean + pks_std,
-                         alpha=0.75, color=color_samples)
-        ax.fill_between(k_pylians,
-                         pks_mean - 2 * pks_std, pks_mean + 2 * pks_std,
-                         alpha=0.25, color=color_samples)
-    ax.plot(k_pylians, pk_MAP, color='magenta', label='MAP', alpha=0.75, lw=0.5)
-    if cosmo_params is not None:
-        ax.plot(k_lin, pk_class_z0, label='Linear', color='black', alpha=0.3, lw=0.5)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm{Nyq}}$')
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_ylabel(r'$P(k)$', fontsize=16)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
-    ax.set_ylim([5e2, 5e4])
-    ax.set_xlim(left=k_pylians[0], right=k_Nq + 0.075)
-    ax.grid(which='both', alpha=0.125)
-
-    # ── T(k) ──
-    ax = axs[1]
-    if has_samples:
-        ax.plot(k_pylians, tks_mean, color=color_samples)
-        ax.fill_between(k_pylians,
-                         tks_mean - tks_std, tks_mean + tks_std,
-                         alpha=0.75, color=color_samples)
-        ax.fill_between(k_pylians,
-                         tks_mean - 2 * tks_std, tks_mean + 2 * tks_std,
-                         alpha=0.25, color=color_samples)
-    ax.plot(k_pylians, tk_MAP, color='magenta', alpha=0.75, lw=0.5)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
-    ax.axhline(1.0, color='k', ls='--', lw=0.5)
-    ax.set_xscale('log')
-    ax.set_ylabel(r'$T(k)$', fontsize=16)
-    ax.set_ylim(0.93, 1.07)
-    ax.set_yticks([0.95, 1.0, 1.05])
-    ax.grid(which='both', alpha=0.1)
-
-    # ── C(k) ──
-    ax = axs[2]
-    ax.plot(k_pylians, xpk_MAP, color='magenta', alpha=0.75, lw=0.5)
-    ax.plot(k_pylians, xpk_linear, alpha=0.75, lw=0.5, color='orange', label=r'$z=0$')
-    if has_samples:
-        ax.plot(k_pylians, xpks_mean, color=color_samples, lw=0.25)
-        ax.fill_between(k_pylians,
-                         xpks_mean - xpks_std, xpks_mean + xpks_std,
-                         alpha=0.75, color=color_samples)
-        ax.fill_between(k_pylians,
-                         xpks_mean - 2 * xpks_std, xpks_mean + 2 * xpks_std,
-                         alpha=0.25, color=color_samples)
-    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
-    ax.axhline(1.0, color='k', ls='--', lw=0.5)
-    ax.set_xscale('log')
-    ax.set_ylabel(r'$C(k)$', fontsize=16)
-    ax.set_xlabel(r'$k$ [$h / \rm{Mpc}$]', fontsize=14)
-    ax.set_ylim([-0.2, 1.2])
-    ax.set_yticks([0, 0.5, 1.0])
-    ax.grid(which='both', alpha=0.1)
-    ax.legend(facecolor='white', edgecolor='none', framealpha=0.9, loc='lower left')
-
-    plt.subplots_adjust(hspace=0)
-    fig.savefig(os.path.join(save_dir, f'2_summary_stats_{run_name}.png'), bbox_inches='tight')
-    plt.close(fig)
-
-    # ── Figure 3: reduced bispectrum Q(theta) ────────────────────────────
-    theta = np.linspace(0, np.pi, 25)
-    # Two triangle configs: equilateral (k1=k2=0.1) and squeezed (k1=0.05, k2=0.1)
-    bispec_configs = [
-        {'k1': 0.1, 'k2': 0.1, 'label': r'$k_1 = k_2 = 0.1\;h/\mathrm{Mpc}$'},
-        {'k1': 0.05, 'k2': 0.1, 'label': r'$k_1 = 0.05,\; k_2 = 0.1\;h/\mathrm{Mpc}$'},
-    ]
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-    theta_deg = np.degrees(theta)
-
-    for ax, cfg in zip(axes, bispec_configs):
-        # True field bispectrum
-        BBk_true = PKL.Bk(delta_z127, box.box_size,
-                          cfg['k1'], cfg['k2'], theta, MAS, threads=1)
-        Qk_true = BBk_true.Q
-
-        # MAP bispectrum
-        BBk_MAP = PKL.Bk(z_MAP, box.box_size,
-                         cfg['k1'], cfg['k2'], theta, MAS, threads=1)
-        Qk_MAP = BBk_MAP.Q
-
-        # Sample bispectra — parallelised over samples (skipped in MAP-only mode)
-        if has_samples:
-            bk_args = [(samples[i], box.box_size, cfg['k1'], cfg['k2'], theta, MAS)
-                       for i in range(len(samples))]
-            with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                Qks = np.array(list(executor.map(_compute_sample_bk, bk_args)))
-
-        ax.plot(theta_deg, Qk_true, marker='.', markersize=3, lw=1,
-                label='True', zorder=10)
-        if has_samples:
-            Qks_mean, Qks_std = Qks.mean(0), Qks.std(0)
-            ax.plot(theta_deg, Qks_mean, lw=1, color=color_samples, label='Samples')
-            ax.fill_between(theta_deg,
-                             Qks_mean - Qks_std, Qks_mean + Qks_std,
-                             alpha=0.75, color=color_samples)
-            ax.fill_between(theta_deg,
-                             Qks_mean - 2 * Qks_std, Qks_mean + 2 * Qks_std,
-                             alpha=0.25, color=color_samples)
-        ax.plot(theta_deg, Qk_MAP, color='magenta', label='MAP', alpha=0.75, lw=1)
-
-        ax.set_xlabel(r'$\theta$ [deg]', fontsize=14)
-        ax.set_title(cfg['label'], fontsize=11)
-        ax.grid(alpha=0.15)
-        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
-
-    axes[0].set_ylabel(r'$Q(\theta)$', fontsize=16)
-    fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, f'3_bispectrum_{run_name}.png'), bbox_inches='tight')
-    plt.close(fig)
-
-    # ── Figure 4: field slices (3×3) ──────────────────────────────────────
-    fig, axes = plt.subplots(3, 3, figsize=(16, 18), sharey=True)
-    vmin, vmax = -3, 3
-    if has_samples:
-        row_labels = ['True IC', 'Posterior sample', 'Residual']
-    else:
-        row_labels = ['True IC', 'MAP estimate', 'MAP residual']
-    row_data = [delta_z127, sample, residual]
-    row_vlims = [(vmin, vmax), (vmin, vmax), (vmin / 2, vmax / 2)]
-
-    slices = [N // 4, N // 4 + N // 8, N // 2]
-
-    for row, (data, label, (lo, hi)) in enumerate(zip(row_data, row_labels, row_vlims)):
-        for col, s in enumerate(slices):
-            im = axes[row, col].imshow(data[s], origin='lower', cmap='seismic', vmin=lo, vmax=hi)
-            axes[row, col].set_title(f'{label}\nslice {s}')
-            axes[row, col].set_xlabel('x (voxels)', fontsize=14)
-            if col == 0:
-                axes[row, col].set_ylabel('y (voxels)', fontsize=14)
-        cbar_ax = fig.add_axes([
-            axes[row, 2].get_position().x1 + 0.01,
-            axes[row, 2].get_position().y0,
-            0.01,
-            axes[row, 2].get_position().height,
-        ])
-        plt.colorbar(im, cax=cbar_ax)
-
-    fig.savefig(os.path.join(save_dir, f'4_field_slices_{run_name}.png'), bbox_inches='tight')
-    plt.close(fig)
-
-    # ── Figure 5: truth / MAP / posterior std ─────────────────────────────
-    fig, axes = plt.subplots(1, 3, figsize=(16, 6), sharey=True)
-    slice_idx = N // 2
-
-    if has_samples:
-        third_panel = (std[slice_idx], 'Posterior std', 'Purples', None, None)
-    else:
-        third_panel = (residual[slice_idx], 'MAP residual', 'seismic', vmin / 2, vmax / 2)
-    panels = [
-        (delta_z127[slice_idx], 'True field', 'seismic', vmin, vmax),
-        (z_MAP[slice_idx], 'MAP estimate', 'seismic', vmin, vmax),
-        third_panel,
-    ]
-    for ax, (data, title, cmap, lo, hi) in zip(axes, panels):
-        im = ax.imshow(data, origin='lower', cmap=cmap, vmin=lo, vmax=hi)
-        ax.set_title(f'{title}, slice {slice_idx}')
-        ax.set_xlabel('x (voxels)', fontsize=14)
-        cbar_ax = fig.add_axes([
-            ax.get_position().x1 + 0.01,
-            ax.get_position().y0,
-            0.01,
-            ax.get_position().height,
-        ])
-        plt.colorbar(im, cax=cbar_ax)
-    axes[0].set_ylabel('y (voxels)', fontsize=14)
-
-    fig.savefig(os.path.join(save_dir, f'5_truth_MAP_std_{run_name}.png'), bbox_inches='tight')
-    plt.close(fig)
-
-    # ── Figure 6: Q-matrix diagonals vs k ─────────────────────────────────
-    if Q_like_D is not None and Q_prior_D is not None:
-        k_flat = box.k.cpu().numpy().flatten()
-        mask = (k_flat < k_Nq) & (k_flat > 1e-3)
-
-        fig, ax = plt.subplots(figsize=(7, 5))
-        ax.scatter(k_flat[mask], Q_like_D[mask], s=0.5, alpha=0.4,
-                   label=r'$D_{\rm like}$')
-        ax.scatter(k_flat[mask], Q_prior_D[mask], s=0.5, alpha=0.4,
-                   label=r'$D_{\rm prior}$')
-        ax.scatter(k_flat[mask], Q_like_D[mask] + Q_prior_D[mask], s=0.5, alpha=0.3,
-                   label=r'$D_{\rm posterior}$')
-        if Q_like_k_nodes is not None and Q_like_D_nodes is not None:
-            ax.scatter(Q_like_k_nodes, Q_like_D_nodes, marker='x', s=60,
-                       color='k', linewidths=1.5, zorder=5,
-                       label=r'$D_{\rm like}$ k-nodes')
-        ax.axvline(x=k_Nq, color='r', linestyle='--', lw=1, label=r'$k_{\rm Nyq}$')
-
-        ax.set_xscale('log')
-        ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
-        ax.set_ylabel(r'$D(k)$', fontsize=14)
-        ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
-        leg = ax.legend(loc='upper right', markerscale=8)
-        # markerscale=8 is needed for the tiny s=0.5 scatter dots but makes
-        # the s=60 k-nodes marker huge; reset any oversized legend handles
-        for lh in leg.legend_handles:
-            if hasattr(lh, 'set_sizes') and len(lh.get_sizes()) > 0:
-                if lh.get_sizes()[0] > 500:
-                    lh.set_sizes([30])
-        ax.grid(alpha=0.15)
-        fig.tight_layout()
-        fig.savefig(os.path.join(save_dir, f'6_Q_diagonals_{run_name}.png'), bbox_inches='tight')
-        plt.close(fig)
-
-    # ── Optional: save diagnostic data files ─────────────────────────────────
     if save_csv:
         diag_dir = os.path.join(save_dir, 'diagnostics')
         os.makedirs(diag_dir, exist_ok=True)
-
-        # Spectra CSV (k-dependent quantities)
         x_true_flat = delta_z127.ravel().astype(np.float64)
-        if has_samples:
-            spectra_keys = [
-                'k', 'pk_true', 'pk_MAP', 'pk_samples_mean', 'pk_samples_std',
-                'tk_MAP', 'tk_samples_mean', 'tk_samples_std',
-                'ck_MAP', 'ck_linear', 'ck_samples_mean', 'ck_samples_std',
-            ]
-            spectra_data = np.column_stack([
-                k_pylians, pk_ic, pk_MAP, pks_mean, pks_std,
-                tk_MAP, tks_mean, tks_std,
-                xpk_MAP, xpk_linear, xpks_mean, xpks_std,
-            ])
-        else:
-            spectra_keys = ['k', 'pk_true', 'pk_MAP', 'tk_MAP', 'ck_MAP', 'ck_linear']
-            spectra_data = np.column_stack([
-                k_pylians, pk_ic, pk_MAP, tk_MAP, xpk_MAP, xpk_linear,
-            ])
-        np.savetxt(os.path.join(diag_dir, f'spectra_{run_name}.csv'),
-                   spectra_data, delimiter=',',
-                   header=','.join(spectra_keys), comments='')
 
-        # Scalars CSV (1-point statistics)
         if has_samples:
             B = samples.shape[0]
-            x_samp = samples.reshape(B, -1).astype(np.float64)
-            mu_samp = x_samp.mean(axis=1)
+            x_samp   = samples.reshape(B, -1).astype(np.float64)
+            mu_samp  = x_samp.mean(axis=1)
             sig_samp = x_samp.std(axis=1, ddof=1)
-            g1 = skew(x_samp, axis=1, bias=False, nan_policy='omit')
-            g2 = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
+            g1       = skew(x_samp, axis=1, bias=False, nan_policy='omit')
+            g2       = kurtosis(x_samp, axis=1, fisher=True, bias=False, nan_policy='omit')
             scalar_keys = [
                 'mean_true', 'mean_samples_mean', 'mean_samples_std',
                 'std_true', 'std_samples_mean', 'std_samples_std',
@@ -887,16 +571,581 @@ def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
                 f'Skewness (truth): {scalar_vals[4]:.6f}  |  MAP: {scalar_vals[5]:.6f}\n',
                 f'Kurtosis (truth): {scalar_vals[6]:.6f}  |  MAP: {scalar_vals[7]:.6f}\n',
             ]
+
         with open(os.path.join(diag_dir, f'scalars_samples_{run_name}.csv'), 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(scalar_keys)
             writer.writerow(scalar_vals)
-
-        # Human-readable txt
         with open(os.path.join(diag_dir, f'samples_summary_{run_name}.txt'), 'w') as f:
             f.write(f'Samples summary: {run_name}\n')
             f.write(f'{"=" * 50}\n\n')
             f.writelines(summary_lines)
+
+
+def plot_2pt_summaries(delta_z127, delta_z0, samples, z_MAP, box,
+                       cosmo_params=None, MAS=None,
+                       save_dir='./plots', run_name='',
+                       save_csv=False, n_workers=None):
+    """Power spectrum P(k), transfer function T(k), and cross-correlation C(k).
+
+    Computes all statistics internally and saves
+    ``2_summary_stats_{run_name}.png``.  When ``save_csv=True`` also writes
+    ``diagnostics/spectra_{run_name}.csv``.
+
+    Parameters
+    ----------
+    delta_z127   : np.ndarray, shape (N, N, N)  True IC field.
+    delta_z0     : np.ndarray, shape (N, N, N)  Observed z=0 field.
+    samples      : np.ndarray, shape (n_samples, N, N, N), or None
+    z_MAP        : np.ndarray, shape (N, N, N)
+    box          : Power_Spectrum_Sampler
+    cosmo_params : dict or None   CLASS parameters for linear theory overlay.
+    MAS          : str or None    Pylians mass-assignment scheme.
+    save_dir     : str
+    run_name     : str
+    save_csv     : bool
+    n_workers    : int or None
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    delta_z127 = delta_z127.astype('f')
+    delta_z0   = delta_z0.astype('f')
+    z_MAP      = z_MAP.astype('f')
+    k_Nq       = box.k_Nq
+    color_samples = 'forestgreen'
+
+    has_samples = samples is not None and np.asarray(samples).size > 0
+    if has_samples:
+        samples = np.asarray(samples).astype('f')
+
+    # XPk gives auto-spectra of both fields and cross-spectrum in one pass
+    Pk_MAP    = PKL.XPk([z_MAP, delta_z127], box.box_size, axis=0,
+                        MAS=[MAS, MAS], threads=1)
+    k_pylians = Pk_MAP.k3D
+    pk_MAP    = Pk_MAP.Pk[:, 0, 0]
+    pk_ic     = Pk_MAP.Pk[:, 0, 1]
+    tk_MAP    = np.sqrt(pk_MAP / pk_ic)
+    xpk_MAP   = Pk_MAP.XPk[:, 0, 0] / np.sqrt(pk_MAP * pk_ic)
+
+    # Cross-correlation between IC and final field (linear baseline)
+    Pk_lin     = PKL.XPk([delta_z127, delta_z0], box.box_size, axis=0,
+                         MAS=[MAS, MAS], threads=1)
+    xpk_linear = Pk_lin.XPk[:, 0, 0] / np.sqrt(
+        Pk_lin.Pk[:, 0, 0] * Pk_lin.Pk[:, 0, 1])
+
+    # Samples P(k), T(k), C(k) — parallelised over samples
+    pks = xpks = tks = None
+    if has_samples:
+        pk_args = [(samples[i], delta_z127, box.box_size, MAS) for i in range(len(samples))]
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            pk_results = list(executor.map(_compute_sample_pk, pk_args))
+        pks  = np.array([r[0] for r in pk_results])
+        xpks = np.array([r[1] for r in pk_results])
+        tks  = np.sqrt(pks / pk_ic)
+        pks_mean,  pks_std  = pks.mean(0),  pks.std(0)
+        tks_mean,  tks_std  = tks.mean(0),  tks.std(0)
+        xpks_mean, xpks_std = xpks.mean(0), xpks.std(0)
+
+    # Optional: linear theory P(k) from CLASS
+    if cosmo_params is not None:
+        k_lin       = np.logspace(np.log10(1e-4), np.log10(10), 100)
+        pk_class_z0 = get_pk_class(cosmo_params, 0, k_lin)
+
+    # ── Figure ────────────────────────────────────────────────────────────
+    fig, axs = plt.subplots(3, sharex=True, sharey=False, height_ratios=[2, 1, 1])
+    fig.set_size_inches(4, 8)
+
+    # P(k)
+    ax = axs[0]
+    ax.plot(k_pylians, pk_ic, marker='.', markersize=0.5, lw=0.5,
+            label='True', zorder=10)
+    if has_samples:
+        ax.plot(k_pylians, pks_mean, lw=0.5, color=color_samples, label='Samples')
+        ax.fill_between(k_pylians,
+                        pks_mean - pks_std, pks_mean + pks_std,
+                        alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                        pks_mean - 2 * pks_std, pks_mean + 2 * pks_std,
+                        alpha=0.25, color=color_samples)
+    ax.plot(k_pylians, pk_MAP, color='magenta', label='MAP', alpha=0.75, lw=0.5)
+    if cosmo_params is not None:
+        ax.plot(k_lin, pk_class_z0, label='Linear', color='black', alpha=0.3, lw=0.5)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5, label=r'$k_{\rm{Nyq}}$')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_ylabel(r'$P(k)$', fontsize=16)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.8)
+    ax.set_ylim([5e2, 5e4])
+    ax.set_xlim(left=k_pylians[0], right=k_Nq + 0.075)
+    ax.grid(which='both', alpha=0.125)
+
+    # T(k)
+    ax = axs[1]
+    if has_samples:
+        ax.plot(k_pylians, tks_mean, color=color_samples)
+        ax.fill_between(k_pylians,
+                        tks_mean - tks_std, tks_mean + tks_std,
+                        alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                        tks_mean - 2 * tks_std, tks_mean + 2 * tks_std,
+                        alpha=0.25, color=color_samples)
+    ax.plot(k_pylians, tk_MAP, color='magenta', alpha=0.75, lw=0.5)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
+    ax.axhline(1.0, color='k', ls='--', lw=0.5)
+    ax.set_xscale('log')
+    ax.set_ylabel(r'$T(k)$', fontsize=16)
+    ax.set_ylim(0.93, 1.07)
+    ax.set_yticks([0.95, 1.0, 1.05])
+    ax.grid(which='both', alpha=0.1)
+
+    # C(k)
+    ax = axs[2]
+    ax.plot(k_pylians, xpk_MAP, color='magenta', alpha=0.75, lw=0.5)
+    ax.plot(k_pylians, xpk_linear, alpha=0.75, lw=0.5, color='orange', label=r'$z=0$')
+    if has_samples:
+        ax.plot(k_pylians, xpks_mean, color=color_samples, lw=0.25)
+        ax.fill_between(k_pylians,
+                        xpks_mean - xpks_std, xpks_mean + xpks_std,
+                        alpha=0.75, color=color_samples)
+        ax.fill_between(k_pylians,
+                        xpks_mean - 2 * xpks_std, xpks_mean + 2 * xpks_std,
+                        alpha=0.25, color=color_samples)
+    ax.axvline(x=k_Nq, color='r', ls='--', lw=0.5, alpha=0.5)
+    ax.axhline(1.0, color='k', ls='--', lw=0.5)
+    ax.set_xscale('log')
+    ax.set_ylabel(r'$C(k)$', fontsize=16)
+    ax.set_xlabel(r'$k$ [$h / \rm{Mpc}$]', fontsize=14)
+    ax.set_ylim([-0.2, 1.2])
+    ax.set_yticks([0, 0.5, 1.0])
+    ax.grid(which='both', alpha=0.1)
+    ax.legend(facecolor='white', edgecolor='none', framealpha=0.9, loc='lower left')
+
+    plt.subplots_adjust(hspace=0)
+    fig.savefig(os.path.join(save_dir, f'2_summary_stats_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    if save_csv:
+        diag_dir = os.path.join(save_dir, 'diagnostics')
+        os.makedirs(diag_dir, exist_ok=True)
+        if has_samples:
+            spectra_keys = [
+                'k', 'pk_true', 'pk_MAP', 'pk_samples_mean', 'pk_samples_std',
+                'tk_MAP', 'tk_samples_mean', 'tk_samples_std',
+                'ck_MAP', 'ck_linear', 'ck_samples_mean', 'ck_samples_std',
+            ]
+            spectra_data = np.column_stack([
+                k_pylians, pk_ic, pk_MAP, pks_mean, pks_std,
+                tk_MAP, tks_mean, tks_std,
+                xpk_MAP, xpk_linear, xpks_mean, xpks_std,
+            ])
+        else:
+            spectra_keys = ['k', 'pk_true', 'pk_MAP', 'tk_MAP', 'ck_MAP', 'ck_linear']
+            spectra_data = np.column_stack([
+                k_pylians, pk_ic, pk_MAP, tk_MAP, xpk_MAP, xpk_linear,
+            ])
+        np.savetxt(os.path.join(diag_dir, f'spectra_{run_name}.csv'),
+                   spectra_data, delimiter=',',
+                   header=','.join(spectra_keys), comments='')
+
+        with open(os.path.join(diag_dir, f'spectra_summary_{run_name}.txt'), 'w') as f:
+            f.write(f'Spectra summary: {run_name}\n')
+            f.write(f'{"=" * 70}\n\n')
+            if has_samples:
+                pk_sigma  = (pks_mean  - pk_ic) / np.where(pks_std  > 0, pks_std,  np.nan)
+                tk_sigma  = (tks_mean  - 1.0)   / np.where(tks_std  > 0, tks_std,  np.nan)
+                ck_sigma  = (xpks_mean - 1.0)   / np.where(xpks_std > 0, xpks_std, np.nan)
+                f.write(f'{"k":>10}  {"P(k) dev [σ]":>14}  {"T(k) dev [σ]":>14}  {"C(k) dev [σ]":>14}\n')
+                f.write('-' * 58 + '\n')
+                for i, k in enumerate(k_pylians):
+                    f.write(f'{k:10.4f}  {pk_sigma[i]:14.3f}  {tk_sigma[i]:14.3f}  {ck_sigma[i]:14.3f}\n')
+            else:
+                f.write('MAP-only mode: no sample statistics available.\n')
+
+
+def plot_3pt_bispectrum(delta_z127, samples, z_MAP, box,
+                        MAS=None, save_dir='./plots', run_name='',
+                        save_csv=False, n_workers=None):
+    """Reduced bispectrum Q(theta) for two triangle configurations.
+
+    Compares the reduced bispectrum of the true IC field against posterior
+    samples (or MAP in MAP-only mode) for equilateral and squeezed triangles.
+    Saves ``3_bispectrum_{run_name}.png``.  When ``save_csv=True`` also writes
+    ``diagnostics/bispectrum_{run_name}.csv`` and
+    ``diagnostics/bispectrum_summary_{run_name}.txt``.
+
+    Parameters
+    ----------
+    delta_z127 : np.ndarray, shape (N, N, N)
+    samples    : np.ndarray, shape (n_samples, N, N, N), or None
+    z_MAP      : np.ndarray, shape (N, N, N)
+    box        : Power_Spectrum_Sampler
+    MAS        : str or None
+    save_dir   : str
+    run_name   : str
+    save_csv   : bool
+    n_workers  : int or None
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    delta_z127 = delta_z127.astype('f')
+    z_MAP      = z_MAP.astype('f')
+    color_samples = 'forestgreen'
+
+    has_samples = samples is not None and np.asarray(samples).size > 0
+    if has_samples:
+        samples = np.asarray(samples).astype('f')
+
+    theta     = np.linspace(0, np.pi, 25)
+    theta_deg = np.degrees(theta)
+    bispec_configs = [
+        {'k1': 0.1,  'k2': 0.1,  'tag': 'eq', 'label': r'$k_1 = k_2 = 0.1\;h/\mathrm{Mpc}$'},
+        {'k1': 0.05, 'k2': 0.1,  'tag': 'sq', 'label': r'$k_1 = 0.05,\; k_2 = 0.1\;h/\mathrm{Mpc}$'},
+    ]
+
+    # ── Compute bispectra for all configs first ───────────────────────────
+    results = []
+    for cfg in bispec_configs:
+        BBk_true = PKL.Bk(delta_z127, box.box_size,
+                          cfg['k1'], cfg['k2'], theta, MAS, threads=1)
+        BBk_MAP  = PKL.Bk(z_MAP, box.box_size,
+                          cfg['k1'], cfg['k2'], theta, MAS, threads=1)
+        Qks_mean = Qks_std = None
+        if has_samples:
+            bk_args = [(samples[i], box.box_size, cfg['k1'], cfg['k2'], theta, MAS)
+                       for i in range(len(samples))]
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                Qks = np.array(list(executor.map(_compute_sample_bk, bk_args)))
+            Qks_mean, Qks_std = Qks.mean(0), Qks.std(0)
+        results.append({
+            'cfg': cfg,
+            'Q_true': BBk_true.Q,
+            'Q_MAP':  BBk_MAP.Q,
+            'Q_samples_mean': Qks_mean,
+            'Q_samples_std':  Qks_std,
+        })
+
+    # ── Plot ─────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    for ax, r in zip(axes, results):
+        ax.plot(theta_deg, r['Q_true'], marker='.', markersize=3, lw=1,
+                label='True', zorder=10)
+        if has_samples:
+            ax.plot(theta_deg, r['Q_samples_mean'], lw=1, color=color_samples, label='Samples')
+            ax.fill_between(theta_deg,
+                            r['Q_samples_mean'] - r['Q_samples_std'],
+                            r['Q_samples_mean'] + r['Q_samples_std'],
+                            alpha=0.75, color=color_samples)
+            ax.fill_between(theta_deg,
+                            r['Q_samples_mean'] - 2 * r['Q_samples_std'],
+                            r['Q_samples_mean'] + 2 * r['Q_samples_std'],
+                            alpha=0.25, color=color_samples)
+        ax.plot(theta_deg, r['Q_MAP'], color='magenta', label='MAP', alpha=0.75, lw=1)
+        ax.set_xlabel(r'$\theta$ [deg]', fontsize=14)
+        ax.set_title(r['cfg']['label'], fontsize=11)
+        ax.grid(alpha=0.15)
+        ax.legend(facecolor='white', edgecolor='none', framealpha=0.8, fontsize=9)
+    axes[0].set_ylabel(r'$Q(\theta)$', fontsize=16)
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'3_bispectrum_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+    # ── Optional CSV + txt ────────────────────────────────────────────────
+    if save_csv:
+        diag_dir = os.path.join(save_dir, 'diagnostics')
+        os.makedirs(diag_dir, exist_ok=True)
+
+        # Build header and data columns: theta + per-config Q values
+        header_parts = ['theta_deg']
+        col_arrays   = [theta_deg]
+        for r in results:
+            tag = r['cfg']['tag']
+            header_parts += [f'Q_true_{tag}', f'Q_MAP_{tag}']
+            col_arrays   += [r['Q_true'], r['Q_MAP']]
+            if has_samples:
+                header_parts += [f'Q_samples_mean_{tag}', f'Q_samples_std_{tag}']
+                col_arrays   += [r['Q_samples_mean'], r['Q_samples_std']]
+
+        np.savetxt(
+            os.path.join(diag_dir, f'bispectrum_{run_name}.csv'),
+            np.column_stack(col_arrays),
+            delimiter=',',
+            header=','.join(header_parts),
+            comments='',
+        )
+
+        with open(os.path.join(diag_dir, f'bispectrum_summary_{run_name}.txt'), 'w') as f:
+            f.write(f'Bispectrum summary: {run_name}\n')
+            f.write(f'{"=" * 70}\n\n')
+            if has_samples:
+                for r in results:
+                    cfg_label = r['cfg']['label'].replace('$', '').replace('\\', '')
+                    q_sigma = ((r['Q_samples_mean'] - r['Q_true'])
+                               / np.where(r['Q_samples_std'] > 0, r['Q_samples_std'], np.nan))
+                    f.write(f"Config {r['cfg']['tag']} ({cfg_label}):\n")
+                    f.write(f'  {"theta [deg]":>12}  {"Q_true":>10}  {"Q_samp_mean":>12}  {"Q dev [σ]":>10}\n')
+                    f.write('  ' + '-' * 50 + '\n')
+                    for i, th in enumerate(theta_deg):
+                        f.write(f'  {th:12.1f}  {r["Q_true"][i]:10.4f}'
+                                f'  {r["Q_samples_mean"][i]:12.4f}  {q_sigma[i]:10.3f}\n')
+                    f.write('\n')
+            else:
+                f.write('MAP-only mode: no sample statistics available.\n')
+
+
+def plot_field_slices(delta_z127, samples, z_MAP,
+                      save_dir='./plots', run_name=''):
+    """3×3 grid of field slices: true IC, posterior sample (or MAP), and residual.
+
+    Three columns show different slice indices; rows show the truth, sample/MAP,
+    and residual.  Saves ``4_field_slices_{run_name}.png``.
+
+    Parameters
+    ----------
+    delta_z127 : np.ndarray, shape (N, N, N)
+    samples    : np.ndarray, shape (n_samples, N, N, N), or None
+    z_MAP      : np.ndarray, shape (N, N, N)
+    save_dir   : str
+    run_name   : str
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    delta_z127 = delta_z127.astype('f')
+    z_MAP      = z_MAP.astype('f')
+    N = delta_z127.shape[0]
+
+    has_samples = samples is not None and np.asarray(samples).size > 0
+    if has_samples:
+        samples  = np.asarray(samples).astype('f')
+        sample   = samples[0]
+        residual = sample - delta_z127
+        row_labels = ['True IC', 'Posterior sample', 'Residual']
+    else:
+        sample   = z_MAP
+        residual = z_MAP - delta_z127
+        row_labels = ['True IC', 'MAP estimate', 'MAP residual']
+
+    vmin, vmax = -3, 3
+    row_data   = [delta_z127, sample, residual]
+    row_vlims  = [(vmin, vmax), (vmin, vmax), (vmin / 2, vmax / 2)]
+    slices     = [N // 4, N // 4 + N // 8, N // 2]
+
+    fig, axes = plt.subplots(3, 3, figsize=(16, 18), sharey=True)
+    for row, (data, label, (lo, hi)) in enumerate(zip(row_data, row_labels, row_vlims)):
+        for col, s in enumerate(slices):
+            im = axes[row, col].imshow(data[s], origin='lower', cmap='seismic', vmin=lo, vmax=hi)
+            axes[row, col].set_title(f'{label}\nslice {s}')
+            axes[row, col].set_xlabel('x (voxels)', fontsize=14)
+            if col == 0:
+                axes[row, col].set_ylabel('y (voxels)', fontsize=14)
+        cbar_ax = fig.add_axes([
+            axes[row, 2].get_position().x1 + 0.01,
+            axes[row, 2].get_position().y0,
+            0.01,
+            axes[row, 2].get_position().height,
+        ])
+        plt.colorbar(im, cax=cbar_ax)
+
+    fig.savefig(os.path.join(save_dir, f'4_field_slices_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_truth_MAP_std(delta_z127, samples, z_MAP,
+                       save_dir='./plots', run_name=''):
+    """1×3 panels: true field, MAP estimate, and posterior std (or MAP residual).
+
+    The third panel shows the posterior standard deviation when samples are
+    provided, or the MAP residual in MAP-only mode.
+    Saves ``5_truth_MAP_std_{run_name}.png``.
+
+    Parameters
+    ----------
+    delta_z127 : np.ndarray, shape (N, N, N)
+    samples    : np.ndarray, shape (n_samples, N, N, N), or None
+    z_MAP      : np.ndarray, shape (N, N, N)
+    save_dir   : str
+    run_name   : str
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    delta_z127 = delta_z127.astype('f')
+    z_MAP      = z_MAP.astype('f')
+    N = delta_z127.shape[0]
+
+    has_samples = samples is not None and np.asarray(samples).size > 0
+    if has_samples:
+        samples  = np.asarray(samples).astype('f')
+        std      = samples.std(axis=0)
+        residual = samples[0] - delta_z127
+    else:
+        std      = None
+        residual = z_MAP - delta_z127
+
+    vmin, vmax = -3, 3
+    slice_idx  = N // 2
+
+    if has_samples:
+        third_panel = (std[slice_idx], 'Posterior std', 'Purples', None, None)
+    else:
+        third_panel = (residual[slice_idx], 'MAP residual', 'seismic', vmin / 2, vmax / 2)
+    panels = [
+        (delta_z127[slice_idx], 'True field',   'seismic', vmin, vmax),
+        (z_MAP[slice_idx],      'MAP estimate', 'seismic', vmin, vmax),
+        third_panel,
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6), sharey=True)
+    for ax, (data, title, cmap, lo, hi) in zip(axes, panels):
+        im = ax.imshow(data, origin='lower', cmap=cmap, vmin=lo, vmax=hi)
+        ax.set_title(f'{title}, slice {slice_idx}')
+        ax.set_xlabel('x (voxels)', fontsize=14)
+        cbar_ax = fig.add_axes([
+            ax.get_position().x1 + 0.01,
+            ax.get_position().y0,
+            0.01,
+            ax.get_position().height,
+        ])
+        plt.colorbar(im, cax=cbar_ax)
+    axes[0].set_ylabel('y (voxels)', fontsize=14)
+
+    fig.savefig(os.path.join(save_dir, f'5_truth_MAP_std_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_Q_diagonals(box, Q_like_D, Q_prior_D,
+                     Q_like_k_nodes=None, Q_like_D_nodes=None,
+                     save_dir='./plots', run_name=''):
+    """Scatter plot of precision matrix diagonals D_like, D_prior, D_post vs k.
+
+    No-op if either ``Q_like_D`` or ``Q_prior_D`` is None.
+    Saves ``6_Q_diagonals_{run_name}.png``.
+
+    Parameters
+    ----------
+    box            : Power_Spectrum_Sampler
+    Q_like_D       : np.ndarray, shape (N^3,), or None
+    Q_prior_D      : np.ndarray, shape (N^3,), or None
+    Q_like_k_nodes : np.ndarray or None   k positions of learnable nodes.
+    Q_like_D_nodes : np.ndarray or None   D values at those nodes.
+    save_dir       : str
+    run_name       : str
+    """
+    if Q_like_D is None or Q_prior_D is None:
+        return
+
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    k_Nq   = box.k_Nq
+    k_flat = box.k.cpu().numpy().flatten()
+    mask   = (k_flat < k_Nq) & (k_flat > 1e-3)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(k_flat[mask], Q_like_D[mask],  s=0.5, alpha=0.4, label=r'$D_{\rm like}$')
+    ax.scatter(k_flat[mask], Q_prior_D[mask], s=0.5, alpha=0.4, label=r'$D_{\rm prior}$')
+    ax.scatter(k_flat[mask], Q_like_D[mask] + Q_prior_D[mask], s=0.5, alpha=0.3,
+               label=r'$D_{\rm posterior}$')
+    if Q_like_k_nodes is not None and Q_like_D_nodes is not None:
+        ax.scatter(Q_like_k_nodes, Q_like_D_nodes, marker='x', s=60,
+                   color='k', linewidths=1.5, zorder=5, label=r'$D_{\rm like}$ k-nodes')
+    ax.axvline(x=k_Nq, color='r', linestyle='--', lw=1, label=r'$k_{\rm Nyq}$')
+    ax.set_xscale('log')
+    ax.set_xlabel(r'$k~[h\,{\rm Mpc}^{-1}]$', fontsize=14)
+    ax.set_ylabel(r'$D(k)$', fontsize=14)
+    ax.set_title(r'Precision matrix diagonals: $Q = U^T D\, U$')
+    leg = ax.legend(loc='upper right', markerscale=8)
+    # markerscale=8 enlarges tiny s=0.5 dots nicely but makes the s=60 k-node
+    # markers huge; reset any oversized legend handles
+    for lh in leg.legend_handles:
+        if hasattr(lh, 'set_sizes') and len(lh.get_sizes()) > 0:
+            if lh.get_sizes()[0] > 500:
+                lh.set_sizes([30])
+    ax.grid(alpha=0.15)
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, f'6_Q_diagonals_{run_name}.png'), bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_samples_analysis(delta_z127, delta_z0, samples, z_MAP, box,
+                          cosmo_params=None, MAS=None,
+                          Q_like_D=None, Q_prior_D=None,
+                          Q_like_k_nodes=None, Q_like_D_nodes=None,
+                          save_dir='./plots', run_name='',
+                          save_csv=False, n_workers=None):
+    """Plot field slices and summary statistics (P(k), T(k), C(k)) for posterior samples.
+
+    When ``samples`` is None or empty, all figures are produced in MAP-only mode:
+    sample uncertainty bands are omitted, and the MAP estimate is used wherever
+    a representative field is needed (field slice, 1pt PDF, bispectrum).
+
+    Produces up to six figures by calling the individual plot functions below:
+      1. ``plot_1pt_pdf``       — 1-point PDF with skewness & kurtosis annotations.
+      2. ``plot_2pt_summaries`` — P(k), T(k), C(k) relative to the ground truth.
+      3. ``plot_3pt_bispectrum``    — reduced bispectrum Q(theta) for two triangle configs.
+      4. ``plot_field_slices``  — true IC / sample (or MAP) / residual (3×3 grid).
+      5. ``plot_truth_MAP_std`` — truth / MAP / posterior std (or MAP residual) (1×3).
+      6. ``plot_Q_diagonals``   — precision matrix diagonals vs k (only if Q provided).
+
+    Each sub-function can also be called independently.
+
+    Parameters
+    ----------
+    delta_z127 : np.ndarray, shape (N, N, N)
+        True initial conditions field (float32).
+    delta_z0 : np.ndarray, shape (N, N, N)
+        Observed final conditions field (float32).
+    samples : np.ndarray, shape (n_samples, N, N, N)
+        Posterior samples (float32).
+    z_MAP : np.ndarray, shape (N, N, N)
+        MAP estimate of the initial conditions (float32).
+    box : Power_Spectrum_Sampler
+        Box object (used for k-grid info and power spectrum computation).
+    cosmo_params : dict, optional
+        Cosmological parameters for CLASS. If provided, the linear theory P(k) is shown.
+    MAS : str, optional
+        Mass assignment scheme for Pylians (e.g. 'PCS'). Default None (no correction).
+    Q_like_D : np.ndarray, shape (N^3,), optional
+        Diagonal of the likelihood precision matrix. If provided together with
+        Q_prior_D, an additional Q-matrix diagnostic plot is produced.
+    Q_prior_D : np.ndarray, shape (N^3,), optional
+        Diagonal of the prior precision matrix.
+    save_dir : str
+        Directory to save the output plots.
+    run_name : str
+        Suffix appended to filenames.
+    save_csv : bool
+        If True, save diagnostic CSV and txt files to a ``diagnostics/`` subfolder.
+    n_workers : int or None
+        Number of parallel workers for sample-level computations.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    plt.rcParams['figure.facecolor'] = 'white'
+
+    plot_1pt_pdf(delta_z127, samples, z_MAP,
+                 save_dir=save_dir, run_name=run_name, save_csv=save_csv)
+
+    plot_2pt_summaries(delta_z127, delta_z0, samples, z_MAP, box,
+                       cosmo_params=cosmo_params, MAS=MAS,
+                       save_dir=save_dir, run_name=run_name,
+                       save_csv=save_csv, n_workers=n_workers)
+
+    plot_3pt_bispectrum(delta_z127, samples, z_MAP, box,
+                        MAS=MAS, save_dir=save_dir, run_name=run_name,
+                        save_csv=save_csv, n_workers=n_workers)
+
+    plot_field_slices(delta_z127, samples, z_MAP,
+                      save_dir=save_dir, run_name=run_name)
+
+    plot_truth_MAP_std(delta_z127, samples, z_MAP,
+                       save_dir=save_dir, run_name=run_name)
+
+    plot_Q_diagonals(box, Q_like_D, Q_prior_D,
+                     Q_like_k_nodes=Q_like_k_nodes,
+                     Q_like_D_nodes=Q_like_D_nodes,
+                     save_dir=save_dir, run_name=run_name)
 
 def plot_training_data(store_path, index, box,
                        cosmo_params=None, MAS=None,

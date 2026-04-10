@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=18
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_a100
-#SBATCH --time=01:00:00
+#SBATCH --time=00:10:00
 #SBATCH --output=./job_outputs/%x-%j-%N_slurm.out
 #SBATCH --error=./job_outputs/R-%x.%j.err
 ## Activate right env
@@ -69,9 +69,13 @@ cd /home/osavchenko/gaussian_npe
 # python scripts/train.py --network MAP_MSE --run_name map_mse_test --max_epochs 70 --sigma_noise 1
 # python scripts/train.py --plot_only --output_dir ./runs/260330_160213_map_mse_test
 
-python scripts/map_then_sample.py \
-    --map_dir runs/260330_163349_map_mse_test \
-    --posterior_dir paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD \
-    --num_samples 1000 \
-    --use_latex \
-    --paper_plot
+# python scripts/map_then_sample.py \
+#     --map_dir runs/260330_163349_map_mse_test \
+#     --posterior_dir paper_test_runs/runs/260303_224547_sweep_networks/260303_224627_net_IsotropicD \
+#     --num_samples 1000 \
+#     --use_latex \
+#     --paper_plot
+
+python scripts/infer.py \
+    --model_dir paper_test_runs/runs/260304_233941_sweep_noise/260304_234003_noise_1 
+
